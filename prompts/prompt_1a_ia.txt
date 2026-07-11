@@ -1,0 +1,534 @@
+Objetivo:
+Extrair e estruturar informações de DOCUMENTOS FISCAIS BRASILEIROS, como NF-e, NFC-e, NFS-e,
+CT-e, boletos, DANFE, RPS, faturas e documentos equivalentes, a partir de imagem, PDF ou texto,
+retornando exclusivamente um JSON válido que siga exatamente o template abaixo.
+
+Template obrigatório:
+{
+  "tipoDocFiscal": "string",
+  "numNota": "string",
+  "serie": "string",
+  "dataDocumento": "dd/MM/yyyy",
+  "chaveAcesso": "string",
+  "municipioPrestacao": "string",
+  "ufPrestacao": "string",
+  "nomeEmitente": "string",
+  "cnpjEmitente": "string",
+  "nomeTomador": "string",
+  "cnpjCpfTomador": "string",
+  "valorTotalDocumento": "string",
+  "valorMercadoria": "string",
+  "totalMaoObra": "string",
+  "totalFrete": "string",
+  "totalSeguro": "string",
+  "totalDespesa": "string",
+  "totalImportacao": "string",
+  "despesaNaoTributada": "string",
+  "valorAcrescimoGeral": "string",
+  "valorDescontoGeral": "string",
+  "baseICMS": "string",
+  "valorICMS": "string",
+  "totalISS": "string",
+  "totalIRRF": "string",
+  "totalINSS": "string",
+  "valorSestSenat": "string",
+  "baseSubstTributaria": "string",
+  "valorICMSRetido": "string",
+  "valorPIS": "string",
+  "valorCOFINS": "string",
+  "totalCSLL": "string",
+  "baseFunRural": "string",
+  "valorFunRural": "string",
+  "valorICMSDesonera": "string",
+  "valorPisRecupera": "string",
+  "valorCofinsRecupera": "string",
+  "percDesconto": "string",
+  "valorDesconto": "string",
+  "valorMaoObra": "string",
+  "valorMercadoriaEmpr": "string",
+  "valorBaseIPI": "string",
+  "percIPI": "string",
+  "valorIPI": "string",
+  "valorIsentoIPI": "string",
+  "valorOutrosIPI": "string",
+  "valorRecuperadoIPI": "string",
+  "percentualIcms": "string",
+  "valorIsentoIcms": "string",
+  "valorOutrosIcms": "string",
+  "valorIcmsRecupera": "string",
+  "valorIcmsRetido": "string",
+  "baseSubTrib": "string",
+  "baseISS": "string",
+  "percentualISS": "string",
+  "valorISS": "string",
+  "baseIRFF": "string",
+  "percentualIRFF": "string",
+  "valorIRFF": "string",
+  "baseINSS": "string",
+  "percentualINSS": "string",
+  "valorINSS": "string",
+  "basePIS": "string",
+  "percentualPIS": "string",
+  "baseCofins": "string",
+  "percentualCofins": "string",
+  "valorCofins": "string",
+  "baseCSLL": "string",
+  "percentualCSLL": "string",
+  "valorCSLL": "string"
+}
+
+Regras obrigatórias de saída:
+1. Retornar somente um objeto JSON válido UTF-8.
+2. Não retornar comentários, Markdown, explicações, blocos de código ou qualquer texto fora do JSON.
+3. Retornar todos os atributos exatamente como no template.
+4. Não criar campos extras.
+5. Todos os valores devem ser strings.
+6. Nunca usar null.
+7. Nunca retornar números fora de strings.
+8. Se não conseguir determinar um valor textual, usar "".
+9. Para campos monetários, percentuais e tributários compatíveis com o documento, usar "0.00" quando
+   o valor estiver ausente, zerado, indicado por traço ou não aplicável ao tipo documental.
+
+Formatação:
+1. Valores monetários, bases, percentuais e quantidades:
+   - Usar ponto como separador decimal.
+   - Não usar separador de milhar.
+   - Usar duas casas decimais.
+   - Remover R$, %, BRL, espaços e quebras.
+   - Converter vírgula decimal para ponto.
+   - Exemplos: "650.00", "2.00", "13.00".
+
+2. Datas:
+   - Usar dd/MM/yyyy.
+   - Se houver data e hora, ignorar a hora.
+   - Se a data for ambígua, interpretar no padrão brasileiro dd/MM/yyyy.
+
+3. CNPJ e CPF:
+   - Usar apenas números.
+   - Remover pontos, barras, hífens e espaços.
+   - Atenção redobrada na leitura visual (Alucinação de "1"): IAs costumam confundir ruídos de
+     imagem, sombras ou linhas verticais de tabelas com o número "1". Verifique minuciosamente se
+     o caractere "1" extraído realmente existe no documento ou se é um ruído colado a outro número.
+   - Validação de tamanho estrutural:
+       - Se o documento indicar que é um CPF, a string final deve conter exatamente 11 dígitos
+         numéricos.
+       - Se o documento indicar que é um CNPJ, a string final deve conter exatamente 14 dígitos
+         numéricos.
+       - Se a extração resultar em 12 dígitos (para CPF) ou 15 dígitos (para CNPJ), identifique o
+         caractere "1" intruso gerado por linhas/bordas da tabela e remova-o.
+   - Checagem final de CPF/CNPJ: Antes de gerar o JSON, conte os caracteres de cnpjEmitente e
+     cnpjCpfTomador. Eles devem possuir exatamente 11 dígitos (se CPF) ou 14 dígitos (se CNPJ).
+     Caso possuam dígitos a mais (como 12 ou 15 dígitos), reavalie visualmente o documento para
+     eliminar "1"s fantasmas gerados por grades ou divisórias do layout que ficaram coladas aos
+     números originais. Nunca retorne tamanhos inválidos (ex: 13 ou 15 dígitos para CNPJ; 10 ou
+     12 dígitos para CPF).
+
+4. Chave de acesso NF-e/NFC-e/CT-e/NFS-e:
+   - Deve conter exatamente 44 dígitos.
+   - Remover qualquer caractere não numérico.
+   - Se não houver chave de 44 dígitos, usar "".
+
+Processo interno antes do JSON final:
+1. Identificar o documento fiscal principal.
+2. Ignorar boletos, recibos, fichas de compensação e cobranças bancárias quando houver nota fiscal
+   principal no mesmo arquivo.
+3. Localizar título, cabeçalho, número, série, data, emitente, tomador, valores totais e tributos.
+4. Classificar `tipoDocFiscal`. Verificar PRIMEIRO se é apólice/endosso/documento de seguradora ->
+   se sim, "APOLICE" (precede todas as outras classificações).
+5. Aplicar as regras tributárias conforme o tipo documental.
+6. Validar internamente os campos críticos antes de responder.
+7. Não exibir o raciocínio; retornar apenas o JSON final.
+
+Classificação de `tipoDocFiscal`:
+1. DANFE ou Nota Fiscal Eletrônica de mercadoria: "NF-E".
+2. NFC-e: "NFC-E".
+3. CT-e ou DACTE: "CT-E".
+4. CT-e Outros Serviços: "CT-EOS".
+5. Nota Fiscal de Serviços da Prefeitura de Goiânia (determinado pelo município da empresa do
+   prestador de serviços e não deve ser confundido com `municipioPrestacao`): "NFS-EG".
+6. Nota Fiscal de Serviços de outro município: "NFS-E".
+7. Nota Fiscal de Serviço de Telecomunicação: "NFSTE".
+8. Nota Fiscal de Energia Elétrica Eletrônica: "NF3E".
+9. Nota Fiscal Fatura de Serviços de Comunicação: "NFSC".
+10. DANFCom: "DANFCom".
+11. Boleto, cobrança bancária, multa ou documento sem nota fiscal principal que não seja documento
+    DETRAN: "BOLP".
+12. Documentos DETRAN genéricos, licenciamento, seguro DPVAT ou documento DETRAN sem menção a IPVA
+    ou ANTT: "BOLP-DETRAN".
+13. Boleto ou documento DETRAN que mencione explicitamente IPVA ou ANTT: "BOLP-DETRAN-IPVA-ANTT".
+14. Recibo isolado: "RECIBO".
+15. Se for NFS-e de Goiânia (cuidado para não confundir com nomes parecidos como "Goianira")
+    (determinado pelo município da empresa do prestador de serviços e não deve ser confundido com
+    `municipioPrestacao`) e houver indicação explícita de MEI, classificar como "NFS-E",
+    não "NFS-EG".
+16. Se houver NFS-e e boleto no mesmo arquivo, classificar pela NFS-e, não pelo boleto.
+17. Apólice de seguro, endosso de seguro, certificado de seguro, nota/aviso de seguro, ou qualquer
+    documento emitido por SEGURADORA. Indicadores: "Apólice", "Nº Apólice", "Endosso",
+    "Seguradora", "SUSEP", "Código na SUSEP", "Prêmio", "Prêmio líquido", "Ramo", "Cobertura",
+    "LMG", "Limite Máximo de Garantia", "Segurado", "Nota de Seguro", "Vigência da apólice":
+    classificar `tipoDocFiscal` como "APOLICE".
+18. PRECEDÊNCIA DE APÓLICE: a classificação "APOLICE" tem prioridade máxima. Se o documento for
+    apólice/endosso/nota de seguro, retornar `tipoDocFiscal` = "APOLICE" mesmo que exista boleto,
+    ficha de compensação, linha digitável ou código de barras no mesmo arquivo. Neste caso não é
+    necessário extrair tributos nem valores: retornar campos monetários como "0.00" e textuais
+    não aplicáveis como "".
+
+Extração de `numNota` e `serie`:
+1. Usar o cabeçalho do documento fiscal principal.
+2. `numNota` deve vir de rótulos como:
+   - "Número da Nota Fiscal"
+   - "Número da Nota"
+   - "Nº da Nota"
+   - "NFS-e nº"
+   - "NF-e nº"
+   - "Número da NFS-e"
+   - "Número do Documento"
+
+3. `serie` deve vir de rótulos como:
+   - "Série"
+   - "Serie"
+   - "Série do Documento"
+   - "Série da Nota"
+   - "Série NF-e"
+   - "Série NFS-e"
+
+4. Se houver texto linearizado como "NOTA FISCAL Nº X SÉRIE Y DATA ...":
+   - `numNota` = X
+   - `serie` = Y
+
+5. Se houver cabeçalho quebrado com rótulos em uma linha e valores na linha seguinte, por exemplo:
+   - "NOTA FISCAL Nº    SÉRIE"
+   - "000002331        001"
+   então:
+   - `numNota` = "000002331"
+   - `serie` = "001"
+
+6. Nunca usar chave de acesso, pedido, contrato, protocolo, NSU, lote, parcela, RPS, boleto,
+   nosso número, linha digitável ou código de barras como `numNota`.
+7. Nunca concatenar `numNota` com `serie`.
+8. Nunca preencher `serie` com o número da nota.
+9. `serie` normalmente possui de 1 a 4 caracteres alfanuméricos; se tiver muitos dígitos, revisar.
+
+Regra de data do documento (dataDocumento):
+1. `dataDocumento` deve ser SEMPRE a data de emissão/documento do arquivo, NUNCA a data de
+   vencimento.
+2. Para BOLETOS e cobranças (tipoDocFiscal BOLP, BOLP-DETRAN, BOLP-DETRAN-IPVA-ANTT, RECIBO),
+   usar a "Data do Documento" ou, na ausência, a "Data de Processamento" da ficha de compensação.
+3. NUNCA usar como `dataDocumento` valores rotulados como "Vencimento", "Data de Vencimento",
+   "Vence em", "Pagável até", "Válido até" ou o fator de vencimento embutido no código de barras.
+4. Se houver "Data do Documento" e "Data de Processamento", priorizar "Data do Documento".
+5. Para NF-e, NFS-e, NFC-e, CT-e e demais notas fiscais, usar a data de emissão da nota.
+6. A data de vencimento não é responsabilidade desta extração; ela é recalculada pelo fluxo a
+   partir da condição de pagamento.
+
+Regras gerais de tributos:
+1. Só preencher tributos compatíveis com o tipo documental e explicitamente informados.
+2. Nunca copiar valor de um tributo para outro.
+3. Nunca copiar ISS para ICMS, ICMS para ISS, IPI para ICMS, PIS para COFINS ou qualquer tributo
+   para outro campo.
+4. Em NFS-e e NFS-EG, não preencher ICMS, ICMS ST ou IPI sem indicação explícita e inequívoca;
+   nesses casos usar "0.00".
+5. Em documentos de serviço, priorizar ISS/ISSQN, IRRF, INSS, PIS, COFINS e CSLL.
+6. Em documentos de mercadoria, preencher ICMS, ICMS ST, IPI, PIS e COFINS somente quando
+   explícitos.
+
+Sinônimos de tributos:
+1. ISS e ISSQN são equivalentes.
+2. Para ISS/ISSQN, reconhecer:
+   - "ISS"
+   - "ISSQN"
+   - "ISQN"
+   - "Imposto Sobre Serviços"
+   - "Imposto Sobre Serviços de Qualquer Natureza"
+   - "Valor ISS"
+   - "Valor ISSQN"
+   - "Vl. ISSQN"
+   - "Vl ISSQN"
+   - "Total ISS"
+   - "Total ISSQN"
+   - "ISS Retido"
+   - "ISSQN Retido"
+   - "Valor ISS Retido"
+   - "Valor ISSQN Retido"
+
+3. Para base do ISS, reconhecer:
+   - "Base ISS"
+   - "Base ISSQN"
+   - "Base de Cálculo"
+   - "Base de Cálculo ISS"
+   - "Base de Cálculo ISSQN"
+   - "BC ISS"
+   - "BC ISSQN"
+
+4. Para alíquota do ISS, reconhecer:
+   - "Alíquota"
+   - "Aliquota"
+   - "Alíquota ISS"
+   - "Alíquota ISSQN"
+   - "Alíq. ISS"
+   - "Alíq. ISSQN"
+   - "% ISS"
+   - "% ISSQN"
+
+5. Para retenção do ISS, reconhecer:
+   - "Tipo de Retenção"
+   - "Retido pelo Tomador"
+   - "ISS Retido: Sim"
+   - "ISSQN Retido: Sim"
+   - "Retenção do ISS: Sim"
+   - "Retenção do ISSQN: Sim"
+   - "Valor ISS Retido"
+   - "Valor ISSQN Retido"
+   - "Total de Retenção"
+
+Regra prioritária para ISS/ISSQN em NFS-e e NFS-EG:
+1. Para `NFS-E` e `NFS-EG`, distinguir:
+   - ISS/ISSQN apurado/calculado;
+   - ISS/ISSQN retido pelo tomador;
+   - ISS/ISSQN não retido;
+   - ISS/ISSQN não devido, isento, imune, dispensado, não incidente ou não exigível.
+
+2. Se houver indicação explícita de ISS/ISSQN retido pelo tomador, com valor de ISS maior que
+   zero, preencher:
+   - `baseISS` com a base de cálculo explícita do ISS/ISSQN, se houver;
+   - `percentualISS` com a alíquota explícita do ISS/ISSQN, se houver;
+   - `valorISS` com o valor explícito do ISS/ISSQN;
+   - `totalISS` com o valor explícito do ISS/ISSQN.
+
+3. A expressão "Tipo de Retenção: Retido pelo Tomador" indica retenção explícita do ISS/ISSQN.
+
+4. Quando houver "Tipo de Retenção: Retido pelo Tomador", "Base de Cálculo", "Alíquota" e
+   "Vl. ISSQN":
+   - `baseISS` deve receber a base de cálculo;
+   - `percentualISS` deve receber a alíquota;
+   - `valorISS` deve receber o valor do ISSQN;
+   - `totalISS` deve receber o valor do ISSQN.
+
+5. Exemplo obrigatório:
+   - Tipo de Retenção: Retido pelo Tomador
+   - Base de Cálculo: R$650,00
+   - Alíquota: 2%
+   - Vl. ISSQN: R$13,00
+   Resultado obrigatório:
+   - `baseISS`: "650.00"
+   - `percentualISS`: "2.00"
+   - `valorISS`: "13.00"
+   - `totalISS`: "13.00"
+
+6. Se houver ISS/ISSQN retido maior que zero, nunca zerar `percentualISS` quando houver alíquota
+   explícita.
+7. Se houver ISS/ISSQN retido maior que zero e a alíquota explícita aparecer apenas como
+   "Alíquota" dentro da seção de ISSQN, usar essa alíquota em `percentualISS`.
+8. Nunca calcular `percentualISS` por divisão entre valor e base quando a alíquota não estiver
+   explícita.
+9. Se houver retenção explícita com valor maior que zero, mas não houver alíquota explícita, usar
+   `percentualISS`: "0.00".
+
+Regra para ISS/ISSQN não retido, não devido ou não incidente:
+1. Se houver indicação explícita de que o ISS/ISSQN não foi retido, não é devido, não incide, é
+   isento, imune, dispensado, não tributável ou não exigível, preencher:
+   - `baseISS`: "0.00"
+   - `percentualISS`: "0.00"
+   - `valorISS`: "0.00"
+   - `totalISS`: "0.00"
+
+2. São indicações explícitas de não retenção ou não exigibilidade:
+   - "ISSQN Retido: Não"
+   - "ISS Retido: Não"
+   - "Retenção do ISSQN: Não"
+   - "Retenção do ISS: Não"
+   - "ISSQN Não Retido"
+   - "ISS Não Retido"
+   - "ISS Não Devido"
+   - "ISSQN Não Devido"
+   - "ISS Não Incide"
+   - "ISSQN Não Incide"
+   - "ISS Isento"
+   - "ISSQN Isento"
+   - "ISS Imune"
+   - "ISSQN Imune"
+   - "ISS Dispensado"
+   - "ISSQN Dispensado"
+   - "ISS Não Tributável"
+   - "ISSQN Não Tributável"
+   - "ISS Não Exigível"
+   - "ISSQN Não Exigível"
+   - campo de ISS retido com valor "0,00", "0.00", "-", vazio, "Não", "Nao", "N" ou equivalente.
+
+3. Quando houver não retenção explícita, não usar base, alíquota, valor ou total de ISS apurado
+   para preencher `baseISS`, `percentualISS`, `valorISS` ou `totalISS`.
+
+4. Quando houver conflito entre ISS apurado maior que zero e ISS retido igual a zero ou "Não",
+   prevalece a não retenção:
+   - `baseISS`: "0.00"
+   - `percentualISS`: "0.00"
+   - `valorISS`: "0.00"
+   - `totalISS`: "0.00"
+
+Ordem de precedência para ISS/ISSQN em NFS-e e NFS-EG:
+1. Primeiro, verificar se há retenção explícita positiva:
+   - "Retido pelo Tomador";
+   - "ISS Retido: Sim";
+   - "ISSQN Retido: Sim";
+   - valor de ISS/ISSQN retido maior que zero;
+   - total de retenção contendo ISS/ISSQN maior que zero.
+   Se sim, preencher base, percentual, valor e total conforme os campos explícitos.
+
+2. Segundo, verificar se há não retenção, não incidência, isenção, imunidade, dispensa ou não
+   exigibilidade.
+   Se sim, zerar `baseISS`, `percentualISS`, `valorISS` e `totalISS`.
+
+3. Terceiro, se não houver nenhuma informação sobre retenção ou não retenção, usar ISS/ISSQN
+   apurado explícito:
+   - `baseISS` com base explícita;
+   - `percentualISS` com alíquota explícita;
+   - `valorISS` com valor explícito;
+   - `totalISS` com valor explícito.
+
+4. Nunca tratar "Retido pelo Tomador" como ausência de retenção.
+5. Nunca zerar `percentualISS` quando houver retenção explícita positiva e alíquota explícita.
+
+Outros tributos retidos:
+1. Em seções de retenção, mapear:
+   - PIS para `valorPIS`;
+   - COFINS para `valorCOFINS` e `valorCofins`;
+   - INSS para `totalINSS` e `valorINSS`;
+   - IRRF ou IRFF para `totalIRRF` e `valorIRFF`;
+   - CSLL para `totalCSLL` e `valorCSLL`.
+
+2. Se houver base e percentual explícitos, preencher também:
+   - `basePIS`, `percentualPIS`;
+   - `baseCofins`, `percentualCofins`;
+   - `baseINSS`, `percentualINSS`;
+   - `baseIRFF`, `percentualIRFF`;
+   - `baseCSLL`, `percentualCSLL`.
+
+3. Não inferir retenção a partir de tributo apenas apurado se houver indicação de não retenção.
+
+Valor total do documento e Valores de Mercadoria/Bases:
+1. Para `valorTotalDocumento`, usar o valor total bruto do documento fiscal principal.
+2. Para NFS-e, preferir:
+   - "Valor Total dos Serviços";
+   - "Valor do Serviço";
+   - "Valor Total da Nota";
+   - "Vl. do Serviço".
+
+3. Não usar valor líquido se houver valor bruto explícito.
+
+4. Regra de Ouro para `valorMercadoria` e Campos de Base de Cálculo em NF-e (DANFE): Quando
+   existir explicitamente o termo "VALOR TOTAL DOS PRODUTOS", o campo `valorMercadoria` e os
+   campos `valorBaseIPI`, `baseIcms`, `baseISS`, `baseIRFF`, `baseINSS`, `basePIS`, `baseCofins`
+   e `baseCSLL` DEVEM receber exatamente o valor bruto contido nesse rótulo (ex: "91257.00").
+   Nunca subtraia descontos, abatimentos ou valores de ICMS desonerado destes campos se o termo
+   "VALOR TOTAL DOS PRODUTOS" estiver presente no arquivo lido.
+
+5. Ainda em NF-e (DANFE): para `valorTotalDocumento`, usar o valor total líquido (final) da nota
+   fiscal, após todas as deduções e descontos (ex: "73800.01"). Ou seja, em DANFE
+   `valorMercadoria` (bruto) pode ser diferente de `valorTotalDocumento` (líquido).
+
+6. Se o termo "VALOR TOTAL DOS PRODUTOS" não estiver claro ou não existir no documento, atribua o
+   mesmo valor de `valorTotalDocumento` a `valorMercadoria` e às respectivas bases monetárias.
+
+7. Não usar valor de boleto se a nota fiscal principal tiver valor total explícito.
+
+Regra específica por emitente (precedência máxima sobre as regras gerais de valor e de tributos):
+1. Emitente CNPJ 03397056000110 (Nilce Lobo Negócios Imobiliários) — boleto de aluguel com
+   retenção de IR:
+   - `valorMercadoria` = soma do valor do "Aluguel" com o valor de "Encargos de locação".
+     Ex.: 17200,00 + 2,50 => "17202.50".
+   - `totalIRRF` e `valorIRRF` = valor do "IR - Imposto de Renda" retido, usando o valor
+     monetário impresso no documento. Ex.: "3348.27". Nunca recalcular por base × alíquota; usar
+     o valor já impresso.
+   - `baseIRFF` = base do IR informada, quando houver. Ex.: "15480.00".
+   - `valorTotalDocumento` = valor total do boleto (líquido a pagar). Ex.: "13854.23".
+   - Conferência obrigatória: `valorMercadoria` menos `totalIRRF` deve ser igual a
+     `valorTotalDocumento` (ex.: 17202,50 - 3348,27 = 13854,23).
+   - Esta regra prevalece sobre "Valor total do documento e Valores de Mercadoria/Bases" e sobre
+     "Campos monetários e tributários com zero padrão" quando o emitente for este CNPJ.
+
+2. Para qualquer outro emitente, ignorar esta seção e seguir as regras gerais.
+
+Campos monetários e tributários com zero padrão:
+Quando compatíveis com o tipo documental e sem valor explícito, preencher com "0.00":
+- totalMaoObra
+- totalFrete
+- totalSeguro
+- totalDespesa
+- totalImportacao
+- despesaNaoTributada
+- valorAcrescimoGeral
+- valorDescontoGeral
+- baseICMS
+- valorICMS
+- valorIPI
+- totalISS
+- totalIRRF
+- totalINSS
+- valorSestSenat
+- baseSubstTributaria
+- valorICMSRetido
+- valorPIS
+- valorCOFINS
+- totalCSLL
+- baseFunRural
+- valorFunRural
+- valorICMSDesonera
+- valorPisRecupera
+- valorCofinsRecupera
+- percDesconto
+- valorDesconto
+- valorMaoObra
+- valorMercadoriaEmpr
+- valorBaseIPI
+- percIPI
+- valorIsentoIPI
+- valorOutrosIPI
+- valorRecuperadoIPI
+- percentualIcms
+- valorIsentoIcms
+- valorOutrosIcms
+- valorIcmsRecupera
+- valorIcmsRetido
+- baseSubTrib
+- baseISS
+- percentualISS
+- valorISS
+- baseIRFF
+- percentualIRFF
+- valorIRFF
+- baseINSS
+- percentualINSS
+- valorINSS
+- basePIS
+- percentualPIS
+- valorPIS
+- baseCofins
+- percentualCofins
+- valorCofins
+- baseCSLL
+- percentualCSLL
+- valorCSLL
+
+Validações finais:
+1. Para NFS-e e NFS-EG com ISS retido positivo:
+   - `percentualISS` deve refletir a alíquota explícita;
+   - `valorISS` e `totalISS` devem refletir o ISS/ISSQN explícito;
+   - `baseISS` deve refletir a base explícita, se houver.
+
+2. Para NFS-e e NFS-EG com "Tipo de Retenção: Retido pelo Tomador":
+   - não preencher `percentualISS` com "0.00" se houver alíquota explícita.
+
+3. Para NFS-e e NFS-EG com "ISSQN Retido: Não" ou retenção de ISS igual a zero:
+   - `baseISS`, `percentualISS`, `valorISS` e `totalISS` devem ser "0.00".
+
+4. Se `tipoDocFiscal` for "APOLICE", não é necessário extrair valores nem tributos: retornar
+   campos monetários como "0.00" e textuais não aplicáveis como "". Manter apenas nomeEmitente,
+   cnpjEmitente, nomeTomador, cnpjCpfTomador e dataDocumento quando disponíveis.
+
+5. Nunca inventar valores.
+6. Nunca calcular percentuais ausentes.
+7. Em caso de conflito entre regra geral e regra específica de ISS/ISSQN, aplicar a regra
+   específica de ISS/ISSQN.
+8. Em caso de conflito entre regra geral e a "Regra específica por emitente", aplicar a regra
+   específica por emitente.
+9. Retornar somente o JSON final, sem explicações.

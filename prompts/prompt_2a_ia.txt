@@ -1,0 +1,245 @@
+Objetivo:
+Extrair informações específicas de DOCUMENTOS FISCAIS BRASILEIROS a partir de imagem, PDF ou texto,
+retornando exclusivamente um JSON válido. Esta chamada é uma camada de redundância e validação
+crítica para:
+1. Extrair a chave de acesso, quando existir.
+2. Identificar de forma inequívoca se o ISS/ISSQN foi retido pelo tomador.
+3. Extrair o valor do ISS/ISSQN retido, quando houver retenção.
+4. Extrair o CNPJ/CPF do tomador do serviço, para validação cruzada com a filial.
+
+Atenção:
+Esta chamada NÃO deve extrair todos os campos fiscais do documento. Ela deve focar apenas nos
+campos do template abaixo.
+
+Template obrigatório:
+{
+  "chaveAcesso": "string",
+  "issRetido": false,
+  "valorISSRetido": "0.00",
+  "cnpjCpfTomador": "string",
+  "numNota": "string"
+}
+
+Regras obrigatórias de saída:
+1. Retornar somente um objeto JSON válido UTF-8.
+2. Não retornar comentários, Markdown, explicações, blocos de código ou qualquer texto fora do JSON.
+3. Retornar todos os atributos exatamente como no template.
+4. Não criar campos extras.
+5. O campo `chaveAcesso` deve ser string.
+6. O campo `issRetido` deve ser booleano real JSON: true ou false.
+7. O campo `valorISSRetido` deve ser string numérica com duas casas decimais e ponto como separador
+   decimal (ex.: "19.00"). Se não houver retenção, usar "0.00".
+8. O campo `cnpjCpfTomador` deve ser string contendo apenas números (sem pontos, barras, hífens ou
+   espaços). Se não encontrar, usar "".
+9. Nunca usar null.
+10. Se não conseguir determinar a chave de acesso, usar "".
+11. Se não conseguir determinar se o ISS/ISSQN é retido, usar false e `valorISSRetido` = "0.00".
+12. Nunca inferir retenção de ISS apenas porque existe Base de Cálculo, Alíquota, Valor do ISSQN,
+    Total do ISSQN ou ISSQN apurado.
+
+Extração de `chaveAcesso`:
+1. Procurar chave de acesso de NF-e, NFC-e, CT-e, CT-e OS, NFS-e, DANFE, DANFCom ou documento
+   equivalente.
+2. A chave deve conter exatamente 44 dígitos.
+3. Remover qualquer caractere não numérico.
+4. Se houver número com 44 dígitos claramente identificado como chave de acesso, preencher
+   `chaveAcesso`.
+5. Se não houver chave de 44 dígitos, usar "".
+6. Nunca usar número da nota, número do documento, número do boleto, nosso número, linha digitável,
+   código de barras bancário, número do RPS, protocolo, lote, pedido ou parcela como chave de
+   acesso.
+
+Extração de `numNota`:
+1. Procure o número da nota tentando se adaptar ao layout do documento, sabendo que o dado pode
+   aparecer à direita ou abaixo do rótulo que indique número da nota.
+
+Extração de `cnpjCpfTomador`:
+1. `cnpjCpfTomador` = CNPJ ou CPF do TOMADOR / DESTINATÁRIO do serviço (a parte que CONTRATOU o
+   serviço), reconhecido em blocos rotulados como "Tomador de Serviços", "Tomador", "Dados do
+   Tomador", "Destinatário" ou equivalente.
+2. NÃO usar o CNPJ do Prestador / Emitente do serviço.
+3. Retornar apenas os números, sem pontos, barras, hífens ou espaços.
+4. Ler dígito a dígito, com atenção; NUNCA reordenar, deslocar, inverter ou "arredondar" dígitos.
+   Um CNPJ tem 14 dígitos e um CPF tem 11 dígitos.
+5. Se o número extraído não tiver 11 nem 14 dígitos após remover os separadores, revisar a leitura.
+6. Se não encontrar o tomador, usar "".
+
+Extração de `valorISSRetido`:
+1. `valorISSRetido` = valor numérico do campo de RETENÇÃO do ISS/ISSQN, reconhecido pelos rótulos
+   "ISSQN Retido", "ISS Retido", "Vl. ISSQN Retido", "VI. ISSQN Retido", "Valor ISSQN Retido",
+   "Valor ISS Retido".
+2. NÃO usar "Total do ISSQN", "Vl. ISSQN", "Valor do ISSQN" nem o ISS apurado/calculado. Esses são
+   o ISS a recolher pelo prestador, não a retenção.
+3. Se não houver campo de retenção, ou se ele for "0,00", "0.00", "-", vazio, "Não", "Nao" ou "N",
+   usar "0.00".
+4. Formato: ponto como separador decimal, duas casas decimais, sem separador de milhar, sem "R$" ou
+   "%".
+5. Exemplo: "Vl. ISSQN Retido: R$ 19,00" => `valorISSRetido`: "19.00".
+
+Definição crítica de `issRetido`:
+O campo `issRetido` deve indicar exclusivamente se o ISS/ISSQN foi RETIDO pelo tomador ou por
+terceiro responsável.
+
+Distinção obrigatória entre campos:
+- "Total do ISSQN" / "Vl. ISSQN" / "Valor do ISSQN" (sem a palavra "Retido") = ISS APURADO /
+  a recolher pelo prestador. Esse campo NÃO indica retenção e o seu valor (mesmo zero) NÃO deve ser
+  usado para decidir issRetido.
+- "ISSQN Retido" / "ISS Retido" / "Vl. ISSQN Retido" / "Valor ISSQN Retido" / "Tipo de Retenção" =
+  campo de RETENÇÃO. Somente este campo (e as expressões de retenção) decide issRetido.
+
+Retornar `"issRetido": true` somente quando houver indicação explícita e inequívoca de retenção
+positiva do ISS/ISSQN, como:
+1. "ISS Retido: Sim"
+2. "ISSQN Retido: Sim"
+3. "Retenção do ISS: Sim"
+4. "Retenção do ISSQN: Sim"
+5. "Tipo de Retenção: Retido pelo Tomador"
+6. "Retido pelo Tomador"
+7. "ISS Retido pelo Tomador"
+8. "ISSQN Retido pelo Tomador"
+9. "Valor ISS Retido" maior que zero
+10. "Valor ISSQN Retido" maior que zero
+11. "ISS Retido" com valor monetário maior que zero
+12. "ISSQN Retido" com valor monetário maior que zero
+13. Seção de retenções indicando ISS/ISSQN com valor maior que zero
+
+Retornar `"issRetido": false` quando houver qualquer indicação explícita de não retenção, como:
+1. "ISS Retido: Não"
+2. "ISSQN Retido: Não"
+3. "ISS Retido: Nao"
+4. "ISSQN Retido: Nao"
+5. "ISS Retido: N"
+6. "ISSQN Retido: N"
+7. "Retenção do ISS: Não"
+8. "Retenção do ISSQN: Não"
+9. "ISS Não Retido"
+10. "ISSQN Não Retido"
+11. "Valor ISS Retido: R$ 0,00"
+12. "Valor ISSQN Retido: R$ 0,00"
+13. "ISS Retido" com valor "0,00", "0.00", "-", vazio, "Não", "Nao" ou "N"
+14. "ISSQN Retido" com valor "0,00", "0.00", "-", vazio, "Não", "Nao" ou "N"
+15. Seção de retenções com ISS/ISSQN igual a zero
+16. Documento com ISS/ISSQN apurado, mas com campo explícito "ISSQN Retido: Não"
+
+Regra de precedência absoluta para `issRetido`:
+1. Primeiro, procure expressões explícitas de retenção positiva.
+2. Depois, procure expressões explícitas de não retenção.
+3. Se existir conflito entre ISS/ISSQN apurado maior que zero e campo "ISSQN Retido: Não", prevalece
+   "ISSQN Retido: Não".
+4. Se existir Base de Cálculo, Alíquota e Valor do ISSQN, mas também existir "ISSQN Retido: Não",
+   retornar `"issRetido": false`.
+5. A existência de Base de Cálculo, Alíquota, Valor do ISSQN, Total do ISSQN ou imposto apurado NÃO
+   significa retenção.
+6. Considerar não retido apenas quando o valor do campo de RETENÇÃO ("ISSQN Retido" / "Vl. ISSQN
+   Retido" / "Valor ISSQN Retido") for zero, vazio, "-", "Não", "Nao" ou "N". O valor de "Total do
+   ISSQN", "Vl. ISSQN" ou do ISS apurado ser zero NÃO torna o documento não retido.
+7. "ISSQN Retido: Sim" (ou "ISS Retido: Sim") SEMPRE resulta em `"issRetido": true`, mesmo que
+   "Total do ISSQN" seja "R$ 0,00".
+8. Um valor positivo em "Vl. ISSQN Retido" / "VI. ISSQN Retido" / "Valor ISSQN Retido" SEMPRE
+   resulta em `"issRetido": true`, mesmo que "Total do ISSQN" seja "R$ 0,00".
+9. ISS/ISSQN apurado é diferente de ISS/ISSQN retido.
+10. Só retornar true quando o documento disser que o ISS/ISSQN foi retido, ou quando houver campo de
+    ISS/ISSQN retido com valor maior que zero.
+11. Se o documento disser explicitamente "ISSQN Retido: Não", retornar false mesmo que existam
+    valores de Base de Cálculo, Alíquota e Valor do ISSQN.
+12. Coerência obrigatória entre `issRetido` e `valorISSRetido`:
+   - Se `valorISSRetido` for maior que zero, então `issRetido` = true.
+   - Se `issRetido` = false, então `valorISSRetido` = "0.00".
+   - Se `issRetido` = true e não houver valor legível de retenção, manter `issRetido` = true e
+     `valorISSRetido` = "0.00".
+
+Caso típico que deve retornar false:
+Se o documento apresentar algo como:
+- Base de Cálculo: R$ 3.832,40
+- Alíquota: 2%
+- Total do ISSQN: R$ 76,65
+- ISSQN Retido: Não
+
+Então o JSON obrigatório é:
+{
+  "chaveAcesso": "",
+  "issRetido": false,
+  "valorISSRetido": "0.00",
+  "cnpjCpfTomador": "",
+  "numNota": ""
+}
+
+Caso típico que deve retornar true:
+Se o documento apresentar algo como:
+- Base de Cálculo: R$ 11,20
+- Alíquota: 4,39%
+- Total do ISSQN: R$ 0,00
+- ISSQN Retido: Sim
+- Vl. ISSQN Retido: R$ 0,49
+
+Então o JSON obrigatório é:
+{
+  "chaveAcesso": "",
+  "issRetido": true,
+  "valorISSRetido": "0.49",
+  "cnpjCpfTomador": "",
+  "numNota": ""
+}
+
+Segundo caso típico que deve retornar true (multi-item):
+Se o documento apresentar algo como:
+- Base de Cálculo: R$ 380,00
+- Alíquota: 5,00%
+- Total do ISSQN: R$ 0,00
+- ISSQN Retido: Sim
+- Vl. ISSQN Retido: R$ 19,00
+
+Então o JSON obrigatório é:
+{
+  "chaveAcesso": "",
+  "issRetido": true,
+  "valorISSRetido": "19.00",
+  "cnpjCpfTomador": "",
+  "numNota": ""
+}
+
+Motivo operacional desta regra:
+Em NFS-e, é comum existir ISS/ISSQN calculado ou apurado na nota, com base, alíquota e valor. Isso
+não significa que o imposto foi retido. A retenção só existe quando o documento informa
+explicitamente retenção pelo tomador/responsável ou quando há valor positivo em campo de ISS/ISSQN
+retido. Também é comum que "Total do ISSQN" apareça como "R$ 0,00" justamente porque o imposto foi
+retido pelo tomador; nesse caso, o campo de retenção ("ISSQN Retido: Sim" / "Vl. ISSQN Retido"
+maior que zero) é que determina a retenção e alimenta `valorISSRetido`. O `cnpjCpfTomador` é usado
+como segunda leitura para validar, de forma cruzada, se o documento pertence à filial correta.
+
+Processo interno antes do JSON final:
+1. Identificar se há documento fiscal principal.
+2. Ignorar boleto, recibo, ficha de compensação, cobrança bancária e linha digitável quando houver
+   nota fiscal principal no mesmo arquivo.
+3. Procurar chave de acesso somente no documento fiscal principal.
+4. Localizar o bloco do TOMADOR e extrair o `cnpjCpfTomador` (apenas números), sem deslocar dígitos.
+5. Procurar especificamente campos e expressões de ISS/ISSQN retido ou não retido.
+6. Diferenciar ISS/ISSQN apurado (Total do ISSQN / Vl. ISSQN) de ISS/ISSQN retido (ISSQN Retido /
+   Vl. ISSQN Retido).
+7. Extrair o valor numérico do campo de retenção para `valorISSRetido` (ou "0.00" se não houver).
+8. Aplicar a precedência:
+   - retenção positiva explícita => `issRetido`: true
+   - não retenção explícita => `issRetido`: false
+   - apenas ISS apurado, sem retenção explícita => `issRetido`: false
+   - ausência de informação sobre ISS => `issRetido`: false
+9. Garantir a coerência entre `issRetido` e `valorISSRetido`.
+10. Validar que `issRetido` é booleano JSON real, não string.
+11. Não exibir raciocínio.
+12. Retornar somente o JSON final.
+
+Validações finais:
+1. `chaveAcesso` deve ser string.
+2. `issRetido` deve ser booleano real JSON.
+3. `valorISSRetido` deve ser string numérica com duas casas decimais.
+4. `cnpjCpfTomador` deve ser string só com números (11 ou 14 dígitos) ou "".
+5. Nunca retornar `"issRetido": "true"` ou `"issRetido": "false"`.
+6. Nunca retornar null.
+7. Nunca criar campos extras.
+8. Se houver "ISSQN Retido: Não", o resultado final obrigatório é `"issRetido": false` e
+   `valorISSRetido` = "0.00".
+9. Se houver "ISS Retido: Não", o resultado final obrigatório é `"issRetido": false` e
+   `valorISSRetido` = "0.00".
+10. Se houver "ISSQN Retido: Sim" ou valor positivo em "Vl. ISSQN Retido" / "Valor ISSQN Retido", o
+    resultado final obrigatório é `"issRetido": true`, com `valorISSRetido` igual ao valor retido,
+    mesmo com "Total do ISSQN: R$ 0,00".
+11. Retornar somente o JSON final, sem explicações.
