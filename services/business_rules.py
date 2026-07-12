@@ -185,6 +185,27 @@ def calcular_deve_lancar_por_vencimento(cnpj_emitente: str, data_documento_br: s
     return not fmt.dias_ate(venc_iso, fmt.hoje_iso(tz)) <= 7
 
 
+def sanitiza_num_nota(num_nota: str) -> str:
+    """Remove caracteres inválidos do número da nota.
+
+    Trata casos como:
+    - "1/77" -> "177" (IA confundiu, remover barra que é artefato visual)
+    - "12345-A" -> "12345" (remove sufixo não numérico)
+    - "NF 123" -> "123" (remove prefixo não numérico)
+    - "1 77" -> "177" (remove espaços)
+    """
+    s = str(num_nota or "").strip()
+
+    # Remover prefixos comuns
+    s = s.replace("NF", "").replace("NFE", "").replace("Nº", "").replace("No", "").strip()
+
+    # Remover TODOS os caracteres não numéricos (incluindo barras, hífens, espaços)
+    # Isso transforma "1/77" em "177", "1 77" em "177", "123-A" em "123"
+    s = "".join(c for c in s if c.isdigit())
+
+    return s
+
+
 def remove_zeros_a_esquerda(num_nota: str) -> str:
     s = str(num_nota or "").strip()
     while s.startswith("0") and len(s) > 1:
@@ -197,9 +218,10 @@ def num_nota_por_pedido(num_nota_ia: str, pdc_codigo) -> str:
 
 
 def resolver_serie(tipo_doc: str, serie_atual: str, chave_acesso: str, cnpj_emitente: str) -> str:
+    from config import CNPJ_VIBRA_ENERGIA
     if tipo_doc not in ("NF-E", "NFSC", "NFSTE", "NF3E"):
         return "UN"
-    if val.normaliza_cnpj(cnpj_emitente) == "34274233030605":
+    if val.normaliza_cnpj(cnpj_emitente) == CNPJ_VIBRA_ENERGIA:
         return "0"
     if str(serie_atual or "").strip() != "":
         return str(serie_atual)

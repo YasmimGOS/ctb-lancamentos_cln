@@ -46,8 +46,19 @@ class IntegraBpmsService:
         if self.s.modo_teste:
             log.info("[MODO_TESTE] registrar BD status=%s pedido=%s doc=%s", status, num_pedido, num_doc)
             return
-        resp = request_json("POST", self.s.bpms_tabpedidosrpainsert_url,
-                            headers={"Authorization": self.s.bpms_token},
-                            json_body={"register_id": register_id, "status": status,
-                                       "num_pedido": str(num_pedido), "num_doc": str(num_doc), "error": erro})
-        resp.raise_for_status()
+
+        # Sanitizar campo erro: remover caracteres problemáticos e limitar tamanho
+        erro_sanitizado = erro.replace("'", "").replace('"', "").replace("[", "(").replace("]", ")")
+        if len(erro_sanitizado) > 500:
+            erro_sanitizado = erro_sanitizado[:497] + "..."
+
+        try:
+            resp = request_json("POST", self.s.bpms_tabpedidosrpainsert_url,
+                                headers={"Authorization": self.s.bpms_token},
+                                json_body={"register_id": register_id, "status": status,
+                                           "num_pedido": str(num_pedido), "num_doc": str(num_doc), "error": erro_sanitizado})
+            resp.raise_for_status()
+            log.info("✓ Registro BD enviado: status=%s pedido=%s doc=%s", status, num_pedido, num_doc)
+        except Exception as exc:  # noqa: BLE001
+            log.error("❌ Falha ao registrar no BD (pedido %s): %s", num_pedido, exc)
+            log.error("   Dados que tentaram ser enviados: status=%s, num_doc=%s, erro=%s", status, num_doc, erro_sanitizado[:100])

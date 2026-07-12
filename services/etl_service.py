@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from config import CNPJ_ALUGUEL_IR, TIPOS_DOC_SERVICO
+from config import CNPJ_ALUGUEL_IR, CNPJ_VIBRA_ENERGIA, TIPOS_DOC_SERVICO
 from utils import formatter as fmt
 from utils import validators as val
 from services import business_rules as br
@@ -21,13 +21,39 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     """Aplica a cadeia de refinamento. Retorna (ia_final, cnpj_emit, cnpj_tom, tipo_doc)."""
     ia = dict(ia)
     ia = br.corrigir_total_iss_por_valor_iss(ia)
-    if str(ia.get("numNota", "")).strip() == "":
-        ia["numNota"] = str(extra.get("numNota", "") or "")
+
+    # Consolidar e sanitizar numNota
+    num_nota_primaria = str(ia.get("numNota", "")).strip()
+    num_nota_extra = str(extra.get("numNota", "")).strip()
+    num_nota_final = num_nota_primaria if num_nota_primaria else num_nota_extra
+    ia["numNota"] = br.sanitiza_num_nota(num_nota_final)
+
+    # Consolidar chave de acesso: priorizar extração extra se tiver 44 dígitos
+    chave_primaria = str(ia.get("chaveAcesso", "")).strip()
+    chave_extra = str(extra.get("chaveAcesso", "")).strip()
+    if len(chave_extra) == 44 and chave_extra.isdigit():
+        ia["chaveAcesso"] = chave_extra
+    elif len(chave_primaria) != 44 or not chave_primaria.isdigit():
+        # Se nenhuma das duas tem 44 dígitos, limpar para evitar erro
+        ia["chaveAcesso"] = ""
+
     ia = br.aplicar_iss_do_valor_retido(ia, extra)
     if br.precisa_retificar_iss_nao_retido(ia, extra):
         ia = br.retificar_iss_nao_retido(ia)
     cnpj_emitente = val.normaliza_cnpj(ia.get("cnpjEmitente", ""))
-    cnpj_tomador = val.normaliza_cnpj(_g(extra, "cnpjCpfTomador") or ia.get("cnpjCpfTomador", ""))
+
+    # Consolidar CNPJ tomador: priorizar extra, mas validar tamanho (14 dígitos CNPJ ou 11 CPF)
+    cnpj_tom_extra = val.normaliza_cnpj(_g(extra, "cnpjCpfTomador"))
+    cnpj_tom_primaria = val.normaliza_cnpj(ia.get("cnpjCpfTomador", ""))
+
+    # Usar extra se tiver tamanho válido, senão usar primária
+    if len(cnpj_tom_extra) in (11, 14):
+        cnpj_tomador = cnpj_tom_extra
+    elif len(cnpj_tom_primaria) in (11, 14):
+        cnpj_tomador = cnpj_tom_primaria
+    else:
+        # Nenhum dos dois é válido, usar o que tiver (pode ficar vazio ou inválido)
+        cnpj_tomador = cnpj_tom_extra or cnpj_tom_primaria
     ia["numNota"] = br.num_nota_por_pedido(ia.get("numNota", ""), pdc_codigo)
     ia = br.calcular_percentuais_por_valor_e_base(ia)
     tipo_doc = br.resolver_tipo_doc_por_emitente(ia.get("tipoDocFiscal", ""), cnpj_emitente)
@@ -38,10 +64,14 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
 def montar_item(dado_pedido: dict, ia: dict, num_nota: str, cnpj_emitente: str,
                 total_nota: str, is_servico: bool, multi_item: bool) -> tuple[dict, float]:
     is_aluguel = cnpj_emitente == CNPJ_ALUGUEL_IR
+    is_vibra = cnpj_emitente == CNPJ_VIBRA_ENERGIA
     vtip = fmt.to_float(_g(dado_pedido, "VALOR_TOTAL_ITEM_PEDIDO", "VALOR_CONFERIDO", default="0"))
 
     if not multi_item:
-        if fmt.to_float(ia.get("valorMercadoria", "0")) > 0:
+        # VIBRA ENERGIA: sempre usar valorTotalDocumento (bruto) da IA
+        if is_vibra:
+            valor_merc = str(ia.get("valorTotalDocumento", total_nota or "0"))
+        elif fmt.to_float(ia.get("valorMercadoria", "0")) > 0:
             valor_merc = str(ia.get("valorMercadoria"))
         elif vtip > 0:
             valor_merc = str(_g(dado_pedido, "VALOR_TOTAL_ITEM_PEDIDO", "VALOR_CONFERIDO", default="0"))
@@ -55,17 +85,32 @@ def montar_item(dado_pedido: dict, ia: dict, num_nota: str, cnpj_emitente: str,
     def perc(campo: str) -> float:
         return fmt.to_float(ia.get(campo, "0"))
 
-    if fmt.to_float(ia.get("valorISS", "0")) > 0:
-        valor_iss = fmt.format_number(ia.get("valorISS", "0"))
-    else:
-        valor_iss = fmt.format_number(base_dec * perc("percentualISS") / 100)
+    def valor_ou_calc(campo_valor: str, campo_perc: str, base: float) -> str:
+        """Retorna valor absoluto da IA se disponível, senão calcula pelo percentual."""
+        valor_abs = fmt.to_float(ia.get(campo_valor, "0"))
+        if valor_abs > 0:
+            return fmt.format_number(valor_abs)
+        return fmt.format_number(base * perc(campo_perc) / 100)
+
+    def perc_ou_calc(campo_valor: str, campo_perc: str, base: float) -> str:
+        """Retorna percentual da IA ou calcula baseado no valor absoluto."""
+        perc_ia = perc(campo_perc)
+        if perc_ia > 0:
+            return fmt.format_number(perc_ia)
+        # Se não tem percentual mas tem valor, calcular percentual reverso
+        valor_abs = fmt.to_float(ia.get(campo_valor, "0"))
+        if valor_abs > 0 and base > 0:
+            return fmt.format_number((valor_abs * 100) / base)
+        return "0.00"
+
+    valor_iss = valor_ou_calc("valorISS", "percentualISS", base_dec)
 
     if is_aluguel:
         valor_irff = fmt.format_number(ia.get("totalIRRF", "0"))
         perc_irff = "0.00"
     else:
-        valor_irff = fmt.format_number(base_dec * perc("percentualIRFF") / 100)
-        perc_irff = fmt.format_number(perc("percentualIRFF")) if str(ia.get("percentualIRFF", "")).strip() else "0.00"
+        valor_irff = valor_ou_calc("totalIRRF", "percentualIRFF", base_dec)
+        perc_irff = perc_ou_calc("totalIRRF", "percentualIRFF", base_dec)
 
     base_fmt = fmt.format_number(base_dec)
     base_icms = "0" if is_servico else base_fmt
@@ -88,14 +133,14 @@ def montar_item(dado_pedido: dict, ia: dict, num_nota: str, cnpj_emitente: str,
         "valorMaoObra": "0",
         "valorMercadoriaEmpr": "0",
         "valorBaseIPI": base_ipi,
-        "percIPI": fmt.format_number(perc("percIPI")),
-        "valorIPI": fmt.format_number(base_dec * perc("percIPI") / 100),
+        "percIPI": perc_ou_calc("valorIPI", "percIPI", base_dec),
+        "valorIPI": valor_ou_calc("valorIPI", "percIPI", base_dec),
         "valorIsentoIPI": "0",
         "valorOutrosIPI": "0",
         "valorRecuperadoIPI": "0",
         "baseIcms": base_icms,
-        "percentualIcms": fmt.format_number(perc("percentualIcms")),
-        "valorIcms": fmt.format_number(base_dec * perc("percentualIcms") / 100),
+        "percentualIcms": perc_ou_calc("valorICMS", "percentualIcms", base_dec),
+        "valorIcms": valor_ou_calc("valorICMS", "percentualIcms", base_dec),
         "valorIsentoIcms": "0",
         "valorOutrosIcms": "0",
         "valorIcmsRecupera": "0",
@@ -109,23 +154,26 @@ def montar_item(dado_pedido: dict, ia: dict, num_nota: str, cnpj_emitente: str,
         "sitTribCofins": "70",
         "calculaValores": "N",
         "baseISS": base_fmt,
-        "percentualISS": fmt.format_number(perc("percentualISS")),
+        "percentualISS": perc_ou_calc("valorISS", "percentualISS", base_dec),
         "valorISS": valor_iss,
+        "baseISSDevido": str(ia.get("baseISSDevido", "0.00")),
+        "percentualISSDevido": str(ia.get("percentualISSDevido", "0.00")),
+        "valorISSDevido": str(ia.get("valorISSDevido", "0.00")),
         "baseIRFF": base_fmt,
         "percentualIRFF": perc_irff,
         "valorIRFF": valor_irff,
         "baseINSS": base_fmt,
-        "percentualINSS": fmt.format_number(perc("percentualINSS")),
-        "valorINSS": fmt.format_number(base_dec * perc("percentualINSS") / 100),
+        "percentualINSS": perc_ou_calc("valorINSS", "percentualINSS", base_dec),
+        "valorINSS": valor_ou_calc("valorINSS", "percentualINSS", base_dec),
         "basePIS": base_fmt,
-        "percentualPIS": fmt.format_number(perc("percentualPIS")),
-        "valorPIS": fmt.format_number(base_dec * perc("percentualPIS") / 100),
+        "percentualPIS": perc_ou_calc("valorPIS", "percentualPIS", base_dec),
+        "valorPIS": valor_ou_calc("valorPIS", "percentualPIS", base_dec),
         "baseCofins": base_fmt,
-        "percentualCofins": fmt.format_number(perc("percentualCofins")),
-        "valorCofins": fmt.format_number(base_dec * perc("percentualCofins") / 100),
+        "percentualCofins": perc_ou_calc("valorCofins", "percentualCofins", base_dec),
+        "valorCofins": valor_ou_calc("valorCofins", "percentualCofins", base_dec),
         "baseCSLL": base_fmt,
-        "percentualCSLL": fmt.format_number(perc("percentualCSLL")),
-        "valorCSLL": fmt.format_number(base_dec * perc("percentualCSLL") / 100),
+        "percentualCSLL": perc_ou_calc("valorCSLL", "percentualCSLL", base_dec),
+        "valorCSLL": valor_ou_calc("valorCSLL", "percentualCSLL", base_dec),
         "sitTribIPI": "49",
         "codEnquadramentoIPI": "999",
     }
@@ -171,7 +219,12 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     is_aluguel = cnpj_emitente == CNPJ_ALUGUEL_IR
     is_servico = br.eh_documento_servico(tipo_doc, TIPOS_DOC_SERVICO)
     multi_item = len(dados_pedido) > 1
-    num_nota = br.remove_zeros_a_esquerda(ia.get("numNota", ""))
+
+    # Sanitizar e limpar número da nota
+    num_nota_raw = ia.get("numNota", "")
+    num_nota_sanitizado = br.sanitiza_num_nota(num_nota_raw)
+    num_nota = br.remove_zeros_a_esquerda(num_nota_sanitizado)
+
     total_nota_ia = ia.get("valorTotalDocumento", "0")
 
     itens: list[dict] = []
@@ -185,7 +238,22 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
         bloqueia_7d = bloqueia_7d or br.bloqueia_por_cond_pagto_7dias(cond)
 
     total_nota = total_nota_ia if fmt.to_float(total_nota_ia) > 0 else fmt.format_number(soma)
-    valor_mercadoria = str(ia.get("valorMercadoria", "0")) if is_aluguel else fmt.format_number(soma)
+
+    # Para serviços, valorMercadoria = valor líquido + impostos retidos (valor bruto)
+    if is_servico:
+        total_nota_dec = fmt.to_float(total_nota)
+        impostos_retidos = (
+            fmt.to_float(ia.get("valorPIS", "0")) +
+            fmt.to_float(ia.get("valorCOFINS", "0")) +
+            fmt.to_float(ia.get("valorCSLL", "0")) +
+            fmt.to_float(ia.get("totalIRRF", "0")) +
+            fmt.to_float(ia.get("totalINSS", "0"))
+        )
+        valor_mercadoria = fmt.format_number(total_nota_dec + impostos_retidos)
+    elif is_aluguel:
+        valor_mercadoria = str(ia.get("valorMercadoria", "0"))
+    else:
+        valor_mercadoria = fmt.format_number(soma)
 
     cond_raw = str(_g(pedido_lista, "COND_ST_CODIGO", default="")) or str(_g(dados_pedido[0] if dados_pedido else {}, "COND_PAGTO", default=""))
     cond_norm = br.normaliza_cond_pagto(cond_raw)
@@ -203,11 +271,18 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     base_icms_raiz = "0" if is_servico else str(ia.get("baseICMS", "0.00"))
     base_ipi_raiz = "0" if is_servico else str(ia.get("valorBaseIPI", "0.00"))
 
+    tipo_preco = str(_g(dados_pedido[0] if dados_pedido else {}, "TIPO_PRECO", default=""))
+    centro_custo = str(_g(dados_pedido[0] if dados_pedido else {}, "CC_RATEIO", "CC_PADRAO", default=""))
+    projeto = str(_g(dados_pedido[0] if dados_pedido else {}, "PROJETO", "PROJ_PADRAO", default=""))
+
     payload = {
         "filial": str(_g(pedido_lista, "FIL_IN_CODIGO", default="")),
         "acao": str(acao_conta.get("acao", varacao_fallback or "")),
         "contasPagarTipoDoc": str(acao_conta.get("contasPagarTipoDoc", "")),
         "agente": str(_g(pedido_lista, "AGN_IN_CODIGO", default="")),
+        "tipoPreco": tipo_preco,
+        "centroCustoReduzido": centro_custo,
+        "projetoReduzido": projeto,
         "numNota": str(num_nota),
         "serie": serie,
         "tipoDocFiscal": tipo_doc_final,
@@ -215,18 +290,34 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
         "dataMovimento": fmt.hoje_br(tz),
         "condPagto": cond_raw,
         "valorMercadoria": valor_mercadoria,
+        "totalMaoObra": str(ia.get("totalMaoObra", "0.00")),
+        "totalFrete": str(ia.get("totalFrete", "0.00")),
+        "totalSeguro": str(ia.get("totalSeguro", "0.00")),
+        "totalDespesa": str(ia.get("totalDespesa", "0.00")),
         "totalNota": str(total_nota),
         "chaveAcesso": chave,
-        "valorDescontoGeral": "0.00",
+        "totalImportacao": str(ia.get("totalImportacao", "0.00")),
+        "despesaNaoTributada": str(ia.get("despesaNaoTributada", "0.00")),
+        "valorAcrescimoGeral": str(ia.get("valorAcrescimoGeral", "0.00")),
+        "valorDescontoGeral": str(ia.get("valorDescontoGeral", "0.00")),
         "baseICMS": base_icms_raiz,
         "valorICMS": str(ia.get("valorICMS", "0.00")),
         "valorIPI": str(ia.get("valorIPI", "0.00")),
         "totalISS": str(ia.get("totalISS", "0.00")),
+        "totalISSDevido": str(ia.get("totalISSDevido", "0.00")),
         "totalIRRF": str(ia.get("totalIRRF", "0.00")),
         "totalINSS": str(ia.get("totalINSS", "0.00")),
+        "valorSestSenat": str(ia.get("valorSestSenat", "0.00")),
+        "baseSubstTributaria": str(ia.get("baseSubstTributaria", "0.00")),
+        "valorICMSRetido": str(ia.get("valorICMSRetido", "0.00")),
         "valorPIS": str(ia.get("valorPIS", "0.00")),
         "valorCOFINS": str(ia.get("valorCOFINS", "0.00")),
         "totalCSLL": str(ia.get("totalCSLL", "0.00")),
+        "baseFunRural": str(ia.get("baseFunRural", "0.00")),
+        "valorFunRural": str(ia.get("valorFunRural", "0.00")),
+        "valorICMSDesonera": str(ia.get("valorICMSDesonera", "0.00")),
+        "valorPisRecupera": str(ia.get("valorPisRecupera", "0.00")),
+        "valorCofinsRecupera": str(ia.get("valorCofinsRecupera", "0.00")),
         "valorBaseIPI": base_ipi_raiz,
         "operacao": "I",
         "calculaValores": "N",

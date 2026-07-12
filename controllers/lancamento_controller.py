@@ -77,13 +77,18 @@ class LancamentoController:
         pdc = pedido.get("PDC_IN_CODIGO")
         filial = pedido.get("FIL_IN_CODIGO")
         agente = pedido.get("AGN_IN_CODIGO")
+        organizacao = pedido.get("ORG_IN_CODIGO")
         fantasia = pedido.get("AGN_ST_FANTASIA", "")
         cond_pagto = pedido.get("COND_ST_CODIGO", "")
+
+        # Criar identificador completo para registro no BD: ORG-PDC-AGN
+        num_pedido_bd = f"{organizacao}-{pdc}-{agente}"
 
         log.info("")
         log.info("╔" + "═" * 98 + "╗")
         log.info("║" + f" PROCESSANDO PEDIDO {pdc}".center(98) + "║")
         log.info("╠" + "═" * 98 + "╣")
+        log.info("║ ID BD: %-89s ║", num_pedido_bd)
         log.info("║ Filial: %-87s ║", filial)
         log.info("║ Agente: %-87s ║", agente)
         log.info("║ Fantasia: %-85s ║", fantasia)
@@ -93,13 +98,28 @@ class LancamentoController:
         res = ResultadoPedido(pedido=pdc, filial=filial)
 
         # ═══════════════════════════════════════════════════════════════════
+        # VERIFICAÇÃO INICIAL: Consultar se pedido já foi processado
+        # ═══════════════════════════════════════════════════════════════════
+        log.info("[VERIFICAÇÃO PRÉVIA] 🔍 Consultando se pedido %s já foi processado no BD...", num_pedido_bd)
+        try:
+            registros_bd = self.bpms.consultar_bd(num_pedido_bd)
+            if registros_bd:
+                log.info("  ⏭️  Pedido %s já consta no BD. Pulando processamento.", num_pedido_bd)
+                res.status = "JaProcessado"
+                res.deve_lancar = False
+                log.info("  └─ Status final: %s", res.status)
+                return res
+            log.info("  ✓ Pedido não encontrado no BD. Prosseguindo com processamento.")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("  ⚠️  Erro ao consultar BD para pedido %s: %s. Prosseguindo mesmo assim.", num_pedido_bd, exc)
+
+        # ═══════════════════════════════════════════════════════════════════
         # ETAPA 1: Verificar REEMBOLSO
         # ═══════════════════════════════════════════════════════════════════
         log.info("[ETAPA 1/7] 🔍 Verificando se é REEMBOLSO...")
         if br.eh_reembolso(fantasia):
             log.warning("  ⚠️  Pedido %s identificado como REEMBOLSO - bloqueio ativado", pdc)
             self.teams.aviso("Pedido identificado como REEMBOLSO. NÃO será lançado automaticamente", pedido=pdc, tipo_negocio=True)
-            self.bpms.registrar(self.id_disparo, "Falha", str(pdc), erro="Reembolso: lancamento manual.")
             res.deve_lancar = False
             res.status = "Reembolso"
             log.info("  └─ Status final: %s", res.status)
@@ -163,22 +183,14 @@ class LancamentoController:
 
         for idx, anexo in enumerate(anexos, 1):
             log.info("  ┌─ Anexo %d/%d", idx, len(anexos))
-            cod_bd = f"{anexo.get('filial')}-{anexo.get('pedido')}"
             nome = str(anexo.get("nomeArquivo", ""))
             log.info("  ├─ Arquivo: %s", nome)
-
-            # Verificar se já foi processado
-            if self.bpms.consultar_bd(cod_bd):
-                log.info("  ├─ ⏭️  Pedido %s já processado (BD não vazio). Pulando anexo.", cod_bd)
-                log.info("  └─")
-                continue
 
             # Verificar se é imagem
             if nome.lower().endswith(IMAGENS):
                 log.warning("  ├─ ⚠️  Arquivo é imagem, só aceita PDF")
                 detalhes_img = {"Arquivo": nome}
                 self.teams.aviso("Arquivo é imagem, só aceita PDF para leitura pela IA", pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes_img)
-                self.bpms.registrar(self.id_disparo, "Sucesso", str(pdc), erro="Anexo imagem, ignorado.")
                 log.info("  └─")
                 continue
 
@@ -235,17 +247,53 @@ class LancamentoController:
             log.info("  │  ├─ contasPagarTipoDoc: %s", acao_conta.get("contasPagarTipoDoc", ""))
             log.info("  │  └─ acao: %s", acao_conta.get("acao", ""))
 
+            # Filtrar dados_pedido para VIBRA ENERGIA (1 PDF = 1 item do pedido)
+            dados_pedido_filtrado = dados_pedido
+            from config import CNPJ_VIBRA_ENERGIA
+            if cnpj_emit == CNPJ_VIBRA_ENERGIA and len(anexos) > 1:
+                # Match pelo valorTotalDocumento da nota com VALOR_TOTAL_ITEM_PEDIDO
+                valor_nota = fmt.to_float(ia_final.get("valorTotalDocumento", "0"))
+                item_match = None
+
+                # Criar lista de itens ainda não usados (rastreamento por índice)
+                if not hasattr(res, '_itens_usados_vibra'):
+                    res._itens_usados_vibra = set()
+
+                for idx, dp in enumerate(dados_pedido):
+                    if idx in res._itens_usados_vibra:
+                        continue  # Item já usado em outro PDF
+
+                    valor_item = fmt.to_float(dp.get("VALOR_TOTAL_ITEM_PEDIDO", "0"))
+                    # Tolerância de 0.01 para comparação de floats
+                    if abs(valor_nota - valor_item) < 0.01:
+                        item_match = dp
+                        res._itens_usados_vibra.add(idx)
+                        log.info("  │  ✓ Match VIBRA: Nota R$ %s -> Item %s (Pedido R$ %s)",
+                                fmt.format_number(valor_nota),
+                                dp.get("ITEM_SEQUENCIA", ""),
+                                fmt.format_number(valor_item))
+                        break
+
+                if item_match:
+                    dados_pedido_filtrado = [item_match]
+                else:
+                    log.warning("  │  ⚠️  VIBRA: Nenhum item do pedido match com valor R$ %s",
+                               fmt.format_number(valor_nota))
+
             # Montar payload
             log.info("  ├─ 📝 Montando payload de recebimento...")
-            payload, bloq7 = etl.montar_payload(pedido, dados_pedido, ia_final, cnpj_emit, tipo_doc, acao_conta, "", self.s.timezone)
+            payload, bloq7 = etl.montar_payload(pedido, dados_pedido_filtrado, ia_final, cnpj_emit, tipo_doc, acao_conta, "", self.s.timezone)
             log.info("  │  ✓ Payload montado")
             log.info("  │  ├─ Bloqueio 7 dias: %s", bloq7)
             log.info("  │  ├─ Total Nota: %s", payload.get("totalNota", ""))
+            log.info("  │  ├─ Valor Mercadoria: %s", payload.get("valorMercadoria", ""))
             log.info("  │  ├─ Num Itens: %d", len(payload.get("itensReceb", [])))
+            if len(payload.get("itensReceb", [])) > 0:
+                log.info("  │  ├─ Item[0] valorMercadoria: %s", payload["itensReceb"][0].get("valorMercadoria", ""))
             log.info("  │  └─ Chave Acesso: %s", payload.get("chaveAcesso", "")[:20] + "..." if payload.get("chaveAcesso") else "")
 
-            payloads.append(payload)
-            contexto = {
+            # Armazenar payload com seu contexto correspondente
+            contexto_payload = {
                 "cnpj_emitente": cnpj_emit,
                 "cnpj_tomador": cnpj_tom,
                 "nome_tomador": ia_final.get("nomeTomador", ""),
@@ -254,12 +302,39 @@ class LancamentoController:
                 "data_documento": ia_final.get("dataDocumento", ""),
                 "cond_pagto": payload.get("condPagto", ""),
             }
+            # Adicionar contexto ao payload para recuperação posterior
+            payload["_contexto"] = contexto_payload
+            payloads.append(payload)
             log.info("  └─ Anexo processado com sucesso")
 
         # ═══════════════════════════════════════════════════════════════════
-        # ETAPA 5: Priorizar Payload
+        # ETAPA 5: Agregar Payloads (VIBRA ENERGIA) e Priorizar
         # ═══════════════════════════════════════════════════════════════════
-        log.info("[ETAPA 5/7] 🎯 Priorizando payload...")
+        log.info("[ETAPA 5/7] 🎯 Processando payloads...")
+
+        # Log dos tipos de documentos encontrados
+        if len(payloads) > 1:
+            tipos = [p.get("tipoDocFiscal", "?") for p in payloads]
+            log.info("  │  Tipos de documentos detectados: %s", ", ".join(tipos))
+
+        # Agregação específica para VIBRA ENERGIA
+        # Pegar CNPJ emitente do primeiro payload (todos devem ter o mesmo emitente)
+        cnpj_emit_final = payloads[0].get("_contexto", {}).get("cnpj_emitente", "") if payloads else ""
+        payloads_originais = len(payloads)
+        payloads = power_flow.agregar_payloads_vibra_energia(payloads, cnpj_emit_final)
+
+        if len(payloads) < payloads_originais:
+            log.info("  ✓ Agregação VIBRA ENERGIA executada")
+            log.info("  │  ├─ Payloads originais: %d", payloads_originais)
+            log.info("  │  ├─ Payloads após agregação: %d", len(payloads))
+            log.info("  │  ├─ Notas consolidadas: %s", payloads[0].get("_notas_agregadas", ""))
+            log.info("  │  ├─ Total de itens renumerados: %d", len(payloads[0].get("itensReceb", [])))
+            log.info("  │  ├─ Valor Mercadoria (recalculado): R$ %s", payloads[0].get("valorMercadoria", ""))
+            log.info("  │  └─ Total Nota agregado: R$ %s", payloads[0].get("totalNota", ""))
+        elif payloads_originais > 1:
+            log.info("  ℹ️  Agregação NÃO aplicada (múltiplos payloads mantidos para priorização)")
+
+        # Priorizar payload
         payload = power_flow.priorizar_payload(payloads)
         if not payload:
             log.error("  ❌ Nenhum payload válido gerado")
@@ -268,6 +343,8 @@ class LancamentoController:
             log.info("  └─ Status final: %s", res.status)
             return res
 
+        # Recuperar o contexto do payload priorizado
+        contexto = payload.get("_contexto", {})
         log.info("  ✓ Payload selecionado: tipoDocFiscal=%s", payload.get("tipoDocFiscal", ""))
         res.tipoDocFiscal = contexto.get("tipo_doc", "")
         res.num_doc = payload.get("numNota", "")
@@ -282,7 +359,6 @@ class LancamentoController:
         if br.eh_apolice(contexto.get("tipo_doc", "")):
             log.warning("  │  ⚠️  Documento é APÓLICE - bloqueio ativado")
             self.teams.aviso("Documento identificado como Apólice de Seguro. NÃO será lançado automaticamente", pedido=pdc, tipo_negocio=True)
-            self.bpms.registrar(self.id_disparo, "Falha", str(pdc), erro="Apolice de seguro: lancamento manual.")
             res.deve_lancar = False
             res.status = "Apolice"
             log.info("  └─ Status final: %s", res.status)
@@ -301,8 +377,6 @@ class LancamentoController:
                 "CNPJ do emitente identificado no documento fiscal": contexto["cnpj_emitente"]
             }
             self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
-            det = f"Fornecedor cadastrado: {cnpj_forn} | CNPJ do documento: {contexto['cnpj_emitente']}"
-            self.bpms.registrar(self.id_disparo, "Falha", str(pdc), erro=f"CNPJ emitente divergente: {det}")
             res.deve_lancar = False
             res.status = "CNPJEmitente"
             log.info("  └─ Status final: %s", res.status)
@@ -323,8 +397,6 @@ class LancamentoController:
                 "Nome do tomador": contexto["nome_tomador"]
             }
             self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
-            det = f"Filial: {cnpj_filial} | Tomador do documento: {contexto['cnpj_tomador']}"
-            self.bpms.registrar(self.id_disparo, "Falha", str(pdc), erro=f"CNPJ tomador divergente: {det}")
             res.deve_lancar = False
             res.status = "CNPJTomador"
             log.info("  └─ Status final: %s", res.status)
@@ -346,10 +418,11 @@ class LancamentoController:
                 "Condição de pagamento": contexto["cond_pagto"]
             }
             self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
-            self.bpms.registrar(self.id_disparo, "Falha", str(pdc), erro="Cond. pagamento <= 7 dias.")
+            # Registrar no BD como sucesso para não reprocessar
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd, erro="Motivo: Condição de pagamento ≤ 7")
             res.deve_lancar = False
             res.status = "CondPagto7Dias"
-            log.info("  └─ Status final: %s", res.status)
+            log.info("  └─ Status final: %s (registrado no BD)", res.status)
             return res
         log.info("  │  ✓ Condição de pagamento válida (> 7 dias)")
         log.info("  └─ Todas as validações passaram")
@@ -358,12 +431,16 @@ class LancamentoController:
         # ETAPA 7: Lançamento no Mega Integrador
         # ═══════════════════════════════════════════════════════════════════
         log.info("[ETAPA 7/7] 🚀 Lançando no Mega Integrador...")
+
+        # Limpar campos internos antes de enviar
+        payload.pop("_contexto", None)
+
         log.info("  ├─ Payload a ser enviado:")
         log.info("  │  %s", json.dumps(payload, indent=2, ensure_ascii=False)[:2000] + "..." if len(json.dumps(payload)) > 2000 else json.dumps(payload, indent=2, ensure_ascii=False))
 
-        return self._lancar(payload, pdc, res)
+        return self._lancar(payload, pdc, num_pedido_bd, res)
 
-    def _lancar(self, payload: dict, pdc: Any, res: ResultadoPedido) -> ResultadoPedido:
+    def _lancar(self, payload: dict, pdc: Any, num_pedido_bd: str, res: ResultadoPedido) -> ResultadoPedido:
         status_code, body = self.mega.lancar_recebimento(payload)
         num_nota = payload.get("numNota", "")
 
@@ -377,7 +454,7 @@ class LancamentoController:
             log.info("  └─ PK Mega: %s", pk_mega)
             msg = "Lançado com sucesso no Mega Integrador"
             self.teams.sucesso(msg, pedido=pdc, num_nota=num_nota, cod_transacao=cod_trans, pk_mega=pk_mega)
-            self.bpms.registrar(self.id_disparo, "Sucesso", str(pdc), num_doc=num_nota)
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd, num_doc=num_nota)
             res.lancado = True
             res.status = "Sucesso"
             log.info("╰─ Status final: %s", res.status)
@@ -392,7 +469,7 @@ class LancamentoController:
             msg = "Nota Fiscal já foi cadastrada no sistema"
             detalhes_nf = {"Nota Fiscal": num_nota}
             self.teams.aviso(msg, pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes_nf)
-            self.bpms.registrar(self.id_disparo, "Sucesso", str(pdc), erro=erros)
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd, erro=erros)
             res.status = "JaCadastrada"
             log.info("╰─ Status final: %s", res.status)
             return res
@@ -405,7 +482,7 @@ class LancamentoController:
                 "Erro retornado": erros
             }
             self.teams.erro(msg, pedido=pdc, tecnico=True, detalhes_extra=detalhes)
-            self.bpms.registrar(self.id_disparo, "Falha", str(pdc), erro=erros)
+            self.bpms.registrar(self.id_disparo, "Falha", num_pedido_bd, erro=erros)
             res.status = "ErroLancamento_415"
             res.mensagem = erros
             log.info("╰─ Status final: %s", res.status)
@@ -420,7 +497,7 @@ class LancamentoController:
             "Erro retornado": erros
         }
         self.teams.erro(msg, pedido=pdc, tecnico=True, detalhes_extra=detalhes)
-        self.bpms.registrar(self.id_disparo, "Falha", str(pdc), erro=erros)
+        self.bpms.registrar(self.id_disparo, "Falha", num_pedido_bd, erro=erros)
         res.status = f"ErroLancamento_{status_code}"
         res.mensagem = erros
         log.info("╰─ Status final: %s", res.status)
