@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from config import CNPJ_ALUGUEL_IR, CNPJ_VIBRA_ENERGIA, TIPOS_DOC_SERVICO
+from config import CNPJ_ALUGUEL_IR, CNPJ_APLICACAO_281, CNPJ_VIBRA_ENERGIA, TIPOS_DOC_SERVICO
 from utils import formatter as fmt
 from utils import validators as val
 from services import business_rules as br
@@ -146,7 +146,7 @@ def montar_item(dado_pedido: dict, ia: dict, num_nota: str, cnpj_emitente: str,
         "valorIcmsRecupera": "0",
         "valorIcmsRetido": fmt.format_number(ia.get("valorIcmsRetido", "0")),
         "baseSubTrib": "0",
-        "aplicacao": str(_g(dado_pedido, "APLICACAO", default="")),
+        "aplicacao": "281" if cnpj_emitente == CNPJ_APLICACAO_281 else str(_g(dado_pedido, "APLICACAO", default="")),
         "tipoClasse": str(_g(dado_pedido, "TIPO_CLASSE", default="")),
         "sitTribICMSA": "0",
         "sitTribICMSB": "90",
@@ -253,7 +253,10 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     elif is_aluguel:
         valor_mercadoria = str(ia.get("valorMercadoria", "0"))
     else:
-        valor_mercadoria = fmt.format_number(soma)
+        # Preferir o "VALOR TOTAL DOS PRODUTOS" (bruto) lido pela IA; só cair para a soma dos
+        # itens do pedido (já líquida) quando a IA não tiver identificado esse valor.
+        valor_merc_ia = fmt.to_float(ia.get("valorMercadoria", "0"))
+        valor_mercadoria = fmt.format_number(valor_merc_ia) if valor_merc_ia > 0 else fmt.format_number(soma)
 
     cond_raw = str(_g(pedido_lista, "COND_ST_CODIGO", default="")) or str(_g(dados_pedido[0] if dados_pedido else {}, "COND_PAGTO", default=""))
     cond_norm = br.normaliza_cond_pagto(cond_raw)

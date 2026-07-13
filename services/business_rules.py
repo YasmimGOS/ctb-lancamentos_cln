@@ -5,6 +5,7 @@ Cada funcao traduz uma regra do fluxo Power Automate. Nenhuma faz I/O.
 from __future__ import annotations
 
 from config import (
+    ALMOXARIFADO_LOCALIZACAO,
     CNPJ_ALUGUEL_IR,
     COND_PAGTO_A_VISTA,
     DEPARA_FILIAIS,
@@ -65,6 +66,7 @@ def aplicar_iss_do_valor_retido(ia: dict, extra: dict) -> dict:
     ia["totalISS"] = fmt.format_number(retido)
     ia["baseISS"] = fmt.format_number(base)
     ia["percentualISS"] = perc
+    ia["valorISSDevido"] = fmt.format_number(retido)
     return ia
 
 
@@ -118,6 +120,33 @@ def valida_emitente_x_fornecedor(cnpj_emitente: str, cnpj_fornecedor: str) -> bo
     return emit == forn or val.mesma_raiz(emit, forn)
 
 
+def valida_emitente_x_fornecedor_multi(cnpjs_emitente: list[str], cnpj_fornecedor: str) -> bool:
+    """Confere se PELO MENOS UM dos CNPJs emitente lidos entre os anexos do pedido bate com o
+    fornecedor cadastrado.
+
+    Usa a redundância de documentos da mesma transação (NF + boletos) para tolerar erro de
+    leitura da IA em um dos anexos, sem afrouxar o critério de comparação (ainda exige CNPJ
+    igual ou mesma raiz - só amplia a evidência disponível).
+    """
+    return any(valida_emitente_x_fornecedor(c, cnpj_fornecedor) for c in cnpjs_emitente)
+
+
+def nome_fornecedor_confere(nomes_candidatos: list[str], nome_fantasia_pedido: str) -> bool:
+    """Confere se algum dos nomes retornados pela consulta de fornecedor (fantasia/razão social)
+    bate com o nome fantasia do pedido - usado para confirmar um CNPJ emitente via cadastro
+    quando a leitura do documento não bate com o fornecedor esperado."""
+    alvo = (nome_fantasia_pedido or "").strip().upper()
+    if not alvo:
+        return False
+    for nome in nomes_candidatos:
+        candidato = (nome or "").strip().upper()
+        if not candidato:
+            continue
+        if alvo in candidato or candidato in alvo:
+            return True
+    return False
+
+
 def valida_tomador_x_filial(cnpj_tomador: str, nome_tomador: str, filial_cod: str, cnpj_filial_pedido: str) -> bool:
     tomador = val.normaliza_cnpj(cnpj_tomador)
     nome = (nome_tomador or "").strip().upper()
@@ -135,6 +164,12 @@ def valida_tomador_x_filial(cnpj_tomador: str, nome_tomador: str, filial_cod: st
     if val.mesma_raiz(tomador, cnpj_filial_pedido):
         return True
     return False
+
+
+def valida_tomador_x_filial_multi(candidatos: list[tuple[str, str]], filial_cod: str, cnpj_filial_pedido: str) -> bool:
+    """Confere se PELO MENOS UM dos pares (cnpj_tomador, nome_tomador) lidos entre os anexos do
+    pedido bate com a filial esperada - mesma lógica de redundância usada para o emitente."""
+    return any(valida_tomador_x_filial(cnpj, nome, filial_cod, cnpj_filial_pedido) for cnpj, nome in candidatos)
 
 
 def normaliza_cond_pagto(cond: str) -> str:
@@ -183,6 +218,75 @@ def calcular_deve_lancar_por_vencimento(cnpj_emitente: str, data_documento_br: s
         return True
     venc_iso = fmt.data_br_para_iso(fmt.add_dias_br(data_documento_br, int(dias_txt)))
     return not fmt.dias_ate(venc_iso, fmt.hoje_iso(tz)) <= 7
+
+
+def calcular_cond_pagto_por_vencimento(data_documento_br: str, data_vencimento_br: str) -> str:
+    """Calcula a condição de pagamento ("NND") a partir da diferença exata em dias corridos
+    entre a data de vencimento do boleto e a data de emissão do documento."""
+    ini = fmt.data_br_para_iso(data_documento_br)
+    fim = fmt.data_br_para_iso(data_vencimento_br)
+    if not ini or not fim:
+        return ""
+    return f"{fmt.dias_ate(fim, ini):02d}D"
+
+
+def valida_cond_pagto_por_vencimento(cond_pagto_raw: str, data_documento_br: str,
+                                      data_vencimento_boleto_br: str) -> tuple[bool, str]:
+    """Confere se a condição de pagamento do pedido bate com o vencimento do boleto anexado.
+
+    Pula a validação (retorna ok=True) quando não há boleto com vencimento extraído, ou quando a
+    condição de pagamento é um código especial sem contagem de dias (ADIANT, CREDITO, etc.) -
+    nesses casos o robo confia no cadastro do pedido, sem bloquear por falta de dado.
+    """
+    if not str(data_vencimento_boleto_br or "").strip():
+        return True, ""
+    cond_norm = normaliza_cond_pagto(cond_pagto_raw)
+    if cond_norm in COND_PAGTO_A_VISTA or unidade_cond_pagto(cond_norm) != "D" or quantidade_cond_pagto(cond_norm) <= 0:
+        return True, ""
+    esperada = calcular_cond_pagto_por_vencimento(data_documento_br, data_vencimento_boleto_br)
+    if not esperada:
+        return True, ""
+    return esperada == cond_norm, esperada
+
+
+def resolver_localizacao_almoxarifado(almoxarifado: str) -> str:
+    """TEMPORÁRIO: só usado para aviso/bloqueio manual (ver ALMOXARIFADO_LOCALIZACAO em
+    config/settings.py). Retorna "" quando o almoxarifado não está no de-para conhecido."""
+    return ALMOXARIFADO_LOCALIZACAO.get(str(almoxarifado or "").strip(), "")
+
+
+def montar_parcelas_por_boletos(num_nota: str, boletos: list[dict], total_nota: str) -> tuple[list[dict], bool, str]:
+    """Monta uma parcela por boleto anexado ao pedido (cada boleto = uma parcela real do
+    pagamento rateado), usando o valor e o vencimento de cada boleto individual.
+
+    Só atua quando há 2 ou mais boletos com valor e vencimento extraídos; com 0 ou 1 boleto,
+    retorna lista vazia (o chamador mantém a parcela única já calculada por vencimento_parcela_1).
+
+    Retorna (parcelas, soma_ok, soma_calculada). soma_ok=False quando a soma dos valores dos
+    boletos não bate com o total da nota (tolerância de 0.01) - quem chama decide se bloqueia.
+    """
+    validos = [
+        b for b in boletos
+        if str(b.get("dataVencimento") or "").strip() and fmt.to_float(b.get("valorTotalDocumento", "0")) > 0
+    ]
+    if len(validos) < 2:
+        return [], True, ""
+
+    ordenados = sorted(validos, key=lambda b: fmt.data_br_para_iso(b["dataVencimento"]) or "9999-99-99")
+    soma = sum(fmt.to_float(b["valorTotalDocumento"]) for b in ordenados)
+
+    parcelas = [
+        {
+            "numNota": str(num_nota),
+            "numDocumento": str(num_nota),
+            "numParcela": str(idx),
+            "dataVencimento": b["dataVencimento"],
+            "valorParcela": fmt.format_number(fmt.to_float(b["valorTotalDocumento"])),
+        }
+        for idx, b in enumerate(ordenados, start=1)
+    ]
+    ok = abs(soma - fmt.to_float(total_nota)) <= 0.01
+    return parcelas, ok, fmt.format_number(soma)
 
 
 def sanitiza_num_nota(num_nota: str) -> str:

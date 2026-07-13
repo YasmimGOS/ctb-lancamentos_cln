@@ -9,6 +9,8 @@ Template obrigatório:
   "numNota": "string",
   "serie": "string",
   "dataDocumento": "dd/MM/yyyy",
+  "dataVencimento": "dd/MM/yyyy",
+  "almoxarifado": "string",
   "chaveAcesso": "string",
   "municipioPrestacao": "string",
   "ufPrestacao": "string",
@@ -136,8 +138,12 @@ Processo interno antes do JSON final:
 4. Classificar `tipoDocFiscal`. Verificar PRIMEIRO se é apólice/endosso/documento de seguradora ->
    se sim, "APOLICE" (precede todas as outras classificações).
 5. Aplicar as regras tributárias conforme o tipo documental.
-6. Validar internamente os campos críticos antes de responder.
-7. Não exibir o raciocínio; retornar apenas o JSON final.
+6. Verificar OBRIGATORIAMENTE, mesmo em documentos longos ou densos, o extremo rodapé da última
+   página em busca do bloco "RESERVADO AO FISCO" (geralmente logo após "VALOR DO ISSQN"/"CALCULO
+   DO ISSQN") — é nesse bloco que costuma aparecer o texto de `almoxarifado` (ver regra específica
+   abaixo). Não pular esta verificação por o documento já ter muitos campos tributários lidos.
+7. Validar internamente os campos críticos antes de responder.
+8. Não exibir o raciocínio; retornar apenas o JSON final.
 
 Classificação de `tipoDocFiscal`:
 1. DANFE ou Nota Fiscal Eletrônica de mercadoria: "NF-E".
@@ -218,8 +224,32 @@ Regra de data do documento (dataDocumento):
    "Vence em", "Pagável até", "Válido até" ou o fator de vencimento embutido no código de barras.
 4. Se houver "Data do Documento" e "Data de Processamento", priorizar "Data do Documento".
 5. Para NF-e, NFS-e, NFC-e, CT-e e demais notas fiscais, usar a data de emissão da nota.
-6. A data de vencimento não é responsabilidade desta extração; ela é recalculada pelo fluxo a
-   partir da condição de pagamento.
+
+Regra de data de vencimento (dataVencimento):
+1. `dataVencimento` só deve ser preenchida quando o documento for um BOLETO ou ficha de
+   cobrança (tipoDocFiscal BOLP, BOLP-DETRAN, BOLP-DETRAN-IPVA-ANTT). Para todos os demais tipos
+   de documento (NF-e, NFS-e, NFC-e, CT-e, RECIBO, APOLICE, etc.), usar sempre "".
+2. Em boletos, usar o valor rotulado como "Vencimento", "Data de Vencimento" ou "Vence em".
+   Se houver linha digitável/código de barras, o fator de vencimento nele embutido pode ser usado
+   apenas como confirmação, nunca como única fonte se houver rótulo explícito de vencimento.
+3. Se o boleto não tiver vencimento explícito nem código de barras interpretável, usar "".
+4. Nunca usar `dataVencimento` para preencher `dataDocumento`, nem vice-versa.
+
+Regra de almoxarifado (almoxarifado):
+1. Procurar SEMPRE no extremo rodapé da última página, na área do canhoto de recebimento ou
+   identificação de cópia — especificamente no bloco "RESERVADO AO FISCO", que normalmente vem
+   logo após "VALOR DO ISSQN"/"CALCULO DO ISSQN" e antes do final da página. Não deixar de
+   verificar esse bloco mesmo em documentos longos, densos ou com muitos campos tributários já
+   lidos (esta é uma verificação obrigatória e independente das demais, ver item 6 do "Processo
+   interno" acima).
+2. Dentro desse bloco, procurar um texto no formato "Almoxarifado - N" ou "Almoxarifado N", onde N
+   é um número. Reconhecer variações de capitalização, incluindo grafias como "ALmoxarifado",
+   "Almoxarifado", "ALMOXARIFADO".
+3. Se encontrar esse texto, preencher `almoxarifado` apenas com o número N (ex.: "Almoxarifado - 1"
+   => "1"; "Almoxarifado - 146" => "146").
+4. Se, após verificar especificamente o bloco "RESERVADO AO FISCO", não houver esse texto no
+   documento, usar "".
+5. Nunca confundir com número de pedido, nota, série, protocolo ou parcela.
 
 Regras gerais de tributos:
 1. Só preencher tributos compatíveis com o tipo documental e explicitamente informados.
@@ -406,14 +436,27 @@ Outros tributos retidos:
 3. Não inferir retenção a partir de tributo apenas apurado se houver indicação de não retenção.
 
 Valor total do documento e Valores de Mercadoria/Bases:
-1. Para `valorTotalDocumento`, usar o valor total bruto do documento fiscal principal.
-2. Para NFS-e, preferir:
-   - "Valor Total dos Serviços";
-   - "Valor do Serviço";
-   - "Valor Total da Nota";
-   - "Vl. do Serviço".
+1. Para `valorTotalDocumento`, usar o valor total bruto do documento fiscal principal, EXCETO nos
+   casos previstos nas regras 2 e 5 abaixo (NFS-e/NFS-EG com retenção e NF-e/DANFE), onde
+   `valorTotalDocumento` deve ser o valor líquido.
 
-3. Não usar valor líquido se houver valor bruto explícito.
+2. Regra específica para NFS-e e NFS-EG: `valorTotalDocumento` deve ser o valor LÍQUIDO do
+   documento — ou seja, o valor do serviço já descontado de todas as retenções (ISS retido, PIS,
+   COFINS, CSLL, IRRF, INSS) e descontos incondicionados/condicionados.
+   - Se houver rótulo explícito de valor líquido, usar exatamente esse valor:
+     "Valor Total Líquido", "Valor Líquido da Nota", "Valor Líquido a Receber",
+     "Valor Total da Nota Fiscal - IBS/CBS" (quando representar o líquido, não o bruto).
+   - Se não houver rótulo explícito de valor líquido, calcular:
+     `valorTotalDocumento` = "Vl. do Serviço"/"Valor Total dos Serviços" (bruto) menos a soma de
+     todas as retenções explícitas (ISS retido + PIS + COFINS + CSLL + IRRF + INSS) e descontos.
+   - Se não houver nenhuma retenção nem desconto explícito, `valorTotalDocumento` é igual ao valor
+     bruto do serviço ("Vl. do Serviço"/"Valor Total dos Serviços"/"Valor Total da Nota").
+   - Exemplo: Vl. do Serviço = "61815.12"; retenções: PIS "401.80" + COFINS "1854.45" +
+     CSLL "618.12" + IRRF "927.23" (ISS não retido); "Valor Total Líquido" explícito = "58013.52".
+     Resultado obrigatório: `valorTotalDocumento` = "58013.52" (nunca "61815.12" nem outro valor).
+
+3. Nunca usar como `valorTotalDocumento` um valor que não seja nem o bruto nem o líquido
+   explicitamente calculável a partir dos campos do documento (nunca inventar ou aproximar).
 
 4. Regra de Ouro para `valorMercadoria` e Campos de Base de Cálculo em NF-e (DANFE): Quando
    existir explicitamente o termo "VALOR TOTAL DOS PRODUTOS", o campo `valorMercadoria` e os
@@ -429,7 +472,24 @@ Valor total do documento e Valores de Mercadoria/Bases:
 6. Se o termo "VALOR TOTAL DOS PRODUTOS" não estiver claro ou não existir no documento, atribua o
    mesmo valor de `valorTotalDocumento` a `valorMercadoria` e às respectivas bases monetárias.
 
-7. Não usar valor de boleto se a nota fiscal principal tiver valor total explícito.
+7. Regra de Ouro para `valorDescontoGeral` em NF-e (DANFE): procurar ativamente, no mesmo bloco de
+   totais onde aparece "VALOR TOTAL DOS PRODUTOS", rótulos de desconto como "VALOR DO DESCONTO",
+   "Desconto", "Vl. Desconto", "Desconto Total" ou "Abatimento". Se existir, preencher
+   `valorDescontoGeral` com esse valor exato.
+   - Conferência obrigatória quando "VALOR TOTAL DOS PRODUTOS" e `valorTotalDocumento` (líquido)
+     forem diferentes: `valorMercadoria` − `valorDescontoGeral` deve ser aproximadamente igual a
+     `valorTotalDocumento` (a diferença pode conter também impostos, frete, seguro etc. somados).
+     Se `valorMercadoria` − `valorTotalDocumento` for positivo e não houver nenhum rótulo de
+     desconto explícito nem outro campo (frete/seguro/despesas) que explique a diferença, revisar
+     o documento novamente antes de concluir que `valorDescontoGeral` é "0.00" — é comum o rótulo
+     de desconto estar em letra pequena perto do total dos produtos.
+   - Exemplo: "VALOR TOTAL DOS PRODUTOS" = "3537.46"; "VALOR DO DESCONTO" = "437.46";
+     `valorTotalDocumento` (líquido) = "3100.00". Resultado obrigatório: `valorDescontoGeral` =
+     "437.46" (nunca "0.00" neste caso, já que a diferença é integralmente explicada pelo desconto).
+   - Se não houver rótulo de desconto e a diferença entre bruto e líquido for zero, usar
+     `valorDescontoGeral` = "0.00" normalmente.
+
+8. Não usar valor de boleto se a nota fiscal principal tiver valor total explícito.
 
 Regra específica por emitente (precedência máxima sobre as regras gerais de valor e de tributos):
 1. Emitente CNPJ 03397056000110 (Nilce Lobo Negócios Imobiliários) — boleto de aluguel com

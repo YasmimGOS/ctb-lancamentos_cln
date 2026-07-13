@@ -54,6 +54,10 @@ class Settings(BaseModel):
     bpms_pedidodadosreceb_url: str = os.getenv("INTEGRA_BPMS_PEDIDODADOSRECEB_URL", "")
     bpms_tabpedidosrpaconsulta_url: str = os.getenv("INTEGRA_BPMS_TABPEDIDOSRPACONSULTA_URL", "")
     bpms_tabpedidosrpainsert_url: str = os.getenv("INTEGRA_BPMS_TABPEDIDOSRPAINSERT_URL", "")
+    bpms_getdadosfornecedorvdois_url: str = os.getenv(
+        "INTEGRA_BPMS_GETDADOSFORNECEDORVDOIS_URL",
+        "https://integra.odilonsantos.com/api/Bpms/getdadosfornecedorvdois",
+    )
     bpms_base_url: str = os.getenv("INTEGRA_BPMS_BASE_URL", "")
     bpms_token: str = _bearer(os.getenv("INTEGRA_BPMS_TOKEN", ""))
 
@@ -146,5 +150,16 @@ TABELA_DEPARA_TIPODOC: dict[str, dict[str, object]] = {
 TIPO_DOC_POR_EMITENTE: dict[str, str] = {"61074175000138": "BOLP"}
 CNPJ_ALUGUEL_IR = "03397056000110"
 CNPJ_VIBRA_ENERGIA = "34274233030605"
+CNPJ_APLICACAO_281 = "04554425000120"
+
+# TEMPORÁRIO: de-para Almoxarifado -> Localização, usado só para AVISO/bloqueio manual hoje
+# (ver services/business_rules.py::resolver_localizacao_almoxarifado e
+# controllers/lancamento_controller.py, validação "Almoxarifado"). O Mega Integrador ainda não
+# tem campo de Almoxarifado/Localização no payload de recebimento; quando a TI adicionar esse
+# campo, trocar o bloqueio manual por preenchimento automático usando este de-para.
+ALMOXARIFADO_LOCALIZACAO: dict[str, str] = {
+    "1": "25001",
+    "146": "32001",
+}
 COND_PAGTO_A_VISTA = {"ADIANT", "TESOURARIA", "A VISTA", "AVISTA", "CREDITO"}
 TIPOS_DOC_SERVICO = {"NFS-EG", "NFS-E", "NFF", "NFSTE", "NFSC"}

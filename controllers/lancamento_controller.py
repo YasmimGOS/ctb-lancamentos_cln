@@ -11,7 +11,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from config import get_settings
+from config import CNPJ_VIBRA_ENERGIA, get_settings
 from models import ResultadoPedido
 from services import business_rules as br
 from services import etl_service as etl
@@ -57,23 +57,25 @@ class LancamentoController:
 
         workers = max(1, int(self.s.max_workers))
         if workers == 1 or len(pedidos) <= 1:
-            return [self._processar_seguro(p) for p in pedidos]
+            resultados_por_pedido = [self._processar_seguro(p) for p in pedidos]
+        else:
+            log.info(sanitize_emoji("🔀 Processando %s pedido(s) em paralelo (max_workers=%s)."), len(pedidos), workers)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                resultados_por_pedido = list(pool.map(self._processar_seguro, pedidos))
 
-        log.info(sanitize_emoji("🔀 Processando %s pedido(s) em paralelo (max_workers=%s)."), len(pedidos), workers)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(self._processar_seguro, pedidos))
+        return [r for lote in resultados_por_pedido for r in lote]
 
-    def _processar_seguro(self, pedido: dict) -> ResultadoPedido:
+    def _processar_seguro(self, pedido: dict) -> list[ResultadoPedido]:
         """Isola falhas: um pedido com erro nao derruba o lote inteiro."""
         try:
             return self.processar_pedido(pedido)
         except Exception as exc:  # noqa: BLE001
             pdc = pedido.get("PDC_IN_CODIGO")
             log.exception(sanitize_emoji("💥 Erro inesperado ao processar pedido %s: %s"), pdc, exc)
-            return ResultadoPedido(pedido=pdc, filial=pedido.get("FIL_IN_CODIGO"),
-                                   deve_lancar=False, status="Excecao", mensagem=str(exc))
+            return [ResultadoPedido(pedido=pdc, filial=pedido.get("FIL_IN_CODIGO"),
+                                   deve_lancar=False, status="Excecao", mensagem=str(exc))]
 
-    def processar_pedido(self, pedido: dict) -> ResultadoPedido:
+    def processar_pedido(self, pedido: dict) -> list[ResultadoPedido]:
         pdc = pedido.get("PDC_IN_CODIGO")
         filial = pedido.get("FIL_IN_CODIGO")
         agente = pedido.get("AGN_IN_CODIGO")
@@ -108,7 +110,7 @@ class LancamentoController:
                 res.status = "JaProcessado"
                 res.deve_lancar = False
                 log.info("  └─ Status final: %s", res.status)
-                return res
+                return [res]
             log.info(sanitize_emoji("  ✓ Pedido não encontrado no BD. Prosseguindo com processamento."))
         except Exception as exc:  # noqa: BLE001
             log.exception(sanitize_emoji("  ⚠️  Erro ao consultar BD para pedido %s: %s. Prosseguindo mesmo assim."), num_pedido_bd, exc)
@@ -123,7 +125,7 @@ class LancamentoController:
             res.deve_lancar = False
             res.status = "Reembolso"
             log.info("  └─ Status final: %s", res.status)
-            return res
+            return [res]
         log.info(sanitize_emoji("  ✓ Não é reembolso"))
 
         # ═══════════════════════════════════════════════════════════════════
@@ -137,14 +139,14 @@ class LancamentoController:
             self.teams.erro("Falha ao obter dados detalhados do pedido", pedido=pdc, tecnico=True)
             res.status = "ErroDadosPedido"
             log.info("  └─ Status final: %s", res.status)
-            return res
+            return [res]
 
         if not dados_pedido:
             log.error(sanitize_emoji("  ❌ Dados do pedido %s não encontrados"), pdc)
             self.teams.erro("Dados do pedido não encontrados", pedido=pdc, tecnico=True)
             res.status = "ErroDadosPedido"
             log.info("  └─ Status final: %s", res.status)
-            return res
+            return [res]
 
         log.info(sanitize_emoji("  ✓ Dados do pedido obtidos: %d item(ns)"), len(dados_pedido))
         log.info("  ├─ Item 1: Produto=%s, Qtd=%s, Valor=%s",
@@ -165,7 +167,7 @@ class LancamentoController:
             self.teams.erro_consultar_anexos(pdc)
             res.status = "ErroAnexos"
             log.info("  └─ Status final: %s", res.status)
-            return res
+            return [res]
 
         log.info(sanitize_emoji("  ✓ Anexos consultados: %d arquivo(s)"), len(anexos))
 
@@ -249,7 +251,6 @@ class LancamentoController:
 
             # Filtrar dados_pedido para VIBRA ENERGIA (1 PDF = 1 item do pedido)
             dados_pedido_filtrado = dados_pedido
-            from config import CNPJ_VIBRA_ENERGIA
             if cnpj_emit == CNPJ_VIBRA_ENERGIA and len(anexos) > 1:
                 # Match pelo valorTotalDocumento da nota com VALOR_TOTAL_ITEM_PEDIDO
                 valor_nota = fmt.to_float(ia_final.get("valorTotalDocumento", "0"))
@@ -301,6 +302,8 @@ class LancamentoController:
                 "bloqueia_7d": bloq7,
                 "data_documento": ia_final.get("dataDocumento", ""),
                 "cond_pagto": payload.get("condPagto", ""),
+                "data_vencimento": ia_final.get("dataVencimento", ""),
+                "almoxarifado": ia_final.get("almoxarifado", ""),
             }
             # Adicionar contexto ao payload para recuperação posterior
             payload["_contexto"] = contexto_payload
@@ -308,7 +311,7 @@ class LancamentoController:
             log.info("  └─ Anexo processado com sucesso")
 
         # ═══════════════════════════════════════════════════════════════════
-        # ETAPA 5: Agregar Payloads (VIBRA ENERGIA) e Priorizar
+        # ETAPA 5: Selecionar Payloads a Lançar
         # ═══════════════════════════════════════════════════════════════════
         log.info(sanitize_emoji("[ETAPA 5/7] 🎯 Processando payloads..."))
 
@@ -317,33 +320,56 @@ class LancamentoController:
             tipos = [p.get("tipoDocFiscal", "?") for p in payloads]
             log.info("  │  Tipos de documentos detectados: %s", ", ".join(tipos))
 
-        # Agregação específica para VIBRA ENERGIA
         # Pegar CNPJ emitente do primeiro payload (todos devem ter o mesmo emitente)
         cnpj_emit_final = payloads[0].get("_contexto", {}).get("cnpj_emitente", "") if payloads else ""
-        payloads_originais = len(payloads)
-        payloads = power_flow.agregar_payloads_vibra_energia(payloads, cnpj_emit_final)
 
-        if len(payloads) < payloads_originais:
-            log.info(sanitize_emoji("  ✓ Agregação VIBRA ENERGIA executada"))
-            log.info("  │  ├─ Payloads originais: %d", payloads_originais)
-            log.info("  │  ├─ Payloads após agregação: %d", len(payloads))
-            log.info("  │  ├─ Notas consolidadas: %s", payloads[0].get("_notas_agregadas", ""))
-            log.info("  │  ├─ Total de itens renumerados: %d", len(payloads[0].get("itensReceb", [])))
-            log.info("  │  ├─ Valor Mercadoria (recalculado): R$ %s", payloads[0].get("valorMercadoria", ""))
-            log.info("  │  └─ Total Nota agregado: R$ %s", payloads[0].get("totalNota", ""))
-        elif payloads_originais > 1:
-            log.info(sanitize_emoji("  ℹ️  Agregação NÃO aplicada (múltiplos payloads mantidos para priorização)"))
+        if cnpj_emit_final == CNPJ_VIBRA_ENERGIA and len(payloads) > 1:
+            # VIBRA ENERGIA: cada anexo é um lançamento independente (sem fusão)
+            log.info(sanitize_emoji("  ✓ VIBRA ENERGIA com múltiplos anexos: %d lançamento(s) independente(s)"), len(payloads))
+            payloads_para_lancar = payloads
+        else:
+            payload_priorizado = power_flow.priorizar_payload(payloads)
+            payloads_para_lancar = [payload_priorizado] if payload_priorizado else []
 
-        # Priorizar payload
-        payload = power_flow.priorizar_payload(payloads)
-        if not payload:
+        if not payloads_para_lancar:
             log.error(sanitize_emoji("  ❌ Nenhum payload válido gerado"))
             self.teams.erro_definir_payload(pdc)
             res.status = "SemPayload"
             log.info("  └─ Status final: %s", res.status)
-            return res
+            return [res]
 
-        # Recuperar o contexto do payload priorizado
+        # Boletos anexos ao pedido (cada um pode ser uma parcela real do pagamento rateado)
+        boletos = [
+            {
+                "valorTotalDocumento": p.get("totalNota", "0"),
+                "dataVencimento": p.get("_contexto", {}).get("data_vencimento", ""),
+            }
+            for p in payloads if str(p.get("contasPagarTipoDoc", "")).startswith("BOLP")
+        ]
+        data_vencimento_boleto = next((b["dataVencimento"] for b in boletos if b["dataVencimento"]), "")
+
+        # Candidatos de CNPJ emitente/tomador entre TODOS os anexos do pedido (redundância entre
+        # NF + boletos da mesma transação, usada para tolerar erro de leitura da IA em um deles)
+        cnpjs_emitente_pedido = [p.get("_contexto", {}).get("cnpj_emitente", "") for p in payloads]
+        tomador_candidatos_pedido = [
+            (p.get("_contexto", {}).get("cnpj_tomador", ""), p.get("_contexto", {}).get("nome_tomador", ""))
+            for p in payloads
+        ]
+
+        resultados = [
+            self._validar_e_lancar_payload(payload, pdc, filial, cnpj_forn, cnpj_filial, num_pedido_bd,
+                                           data_vencimento_boleto, boletos, fantasia,
+                                           cnpjs_emitente_pedido, tomador_candidatos_pedido)
+            for payload in payloads_para_lancar
+        ]
+        return resultados
+
+    def _validar_e_lancar_payload(self, payload: dict, pdc: Any, filial: Any, cnpj_forn: str,
+                                   cnpj_filial: str, num_pedido_bd: str,
+                                   data_vencimento_boleto: str = "", boletos: list[dict] | None = None,
+                                   fantasia_pedido: str = "", cnpjs_emitente_pedido: list[str] | None = None,
+                                   tomador_candidatos_pedido: list[tuple[str, str]] | None = None) -> ResultadoPedido:
+        res = ResultadoPedido(pedido=pdc, filial=filial)
         contexto = payload.get("_contexto", {})
         log.info(sanitize_emoji("  ✓ Payload selecionado: tipoDocFiscal=%s"), payload.get("tipoDocFiscal", ""))
         res.tipoDocFiscal = contexto.get("tipo_doc", "")
@@ -365,16 +391,66 @@ class LancamentoController:
             return res
         log.info(sanitize_emoji("  │  ✓ Não é apólice"))
 
+        # Validação: Almoxarifado (TEMPORÁRIO - ver nota abaixo)
+        # O Mega Integrador ainda não tem campo de Almoxarifado/Localização no payload de
+        # recebimento. Enquanto a TI não adiciona esse campo, só avisamos e bloqueamos para
+        # lançamento manual quando o documento menciona um Almoxarifado. Referência para quando
+        # isso for resolvido: config/settings.py::ALMOXARIFADO_LOCALIZACAO e
+        # services/business_rules.py::resolver_localizacao_almoxarifado - trocar este bloqueio por
+        # preenchimento automático do campo correspondente no payload.
+        log.info("  ├─ Validação 2: Verificando menção a Almoxarifado no documento...")
+        almoxarifado = contexto.get("almoxarifado", "")
+        if almoxarifado:
+            localizacao = br.resolver_localizacao_almoxarifado(almoxarifado)
+            log.warning(sanitize_emoji("  │  ⚠️  Documento menciona Almoxarifado %s - bloqueio manual ativado"), almoxarifado)
+            msg = "Documento indica situação de Almoxarifado - lançamento requer análise manual"
+            detalhes = {
+                "Almoxarifado identificado no documento": almoxarifado,
+                "Localização correspondente": localizacao or "não mapeada - revisar manualmente",
+            }
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                erro=f"Motivo: Almoxarifado {almoxarifado} identificado (localizacao={localizacao or 'nao mapeada'}) - lancamento manual")
+            res.deve_lancar = False
+            res.status = "AlmoxarifadoManual"
+            log.info("  └─ Status final: %s (registrado no BD)", res.status)
+            return res
+        log.info(sanitize_emoji("  │  ✓ Sem menção a Almoxarifado"))
+
         # Validação: CNPJ Emitente x Fornecedor
-        log.info("  ├─ Validação 2: CNPJ Emitente x Fornecedor...")
+        log.info("  ├─ Validação 3: CNPJ Emitente x Fornecedor...")
         log.info("  │  ├─ CNPJ Documento: %s", contexto["cnpj_emitente"])
         log.info("  │  └─ CNPJ Esperado: %s", cnpj_forn)
-        if not br.valida_emitente_x_fornecedor(contexto["cnpj_emitente"], cnpj_forn):
+        emitente_ok = br.valida_emitente_x_fornecedor(contexto["cnpj_emitente"], cnpj_forn)
+        cnpjs_pedido = cnpjs_emitente_pedido or [contexto["cnpj_emitente"]]
+
+        # Se o documento selecionado não bateu, tenta a redundância entre os anexos do pedido
+        # (ex: NF leu errado, mas os boletos da mesma transação leram o CNPJ certo)
+        if not emitente_ok and br.valida_emitente_x_fornecedor_multi(cnpjs_pedido, cnpj_forn):
+            log.info(sanitize_emoji("  │  ℹ️  CNPJ do documento selecionado divergente, mas outro anexo do pedido confirma o fornecedor"))
+            emitente_ok = True
+
+        # Se ainda não bateu, consulta o cadastro de fornecedor por CNPJ (nome fantasia) pra cada
+        # CNPJ distinto lido entre os anexos - confirma se algum deles é realmente o fornecedor
+        cnpj_confirmado_via_api = ""
+        if not emitente_ok:
+            candidatos_distintos = {val.normaliza_cnpj(c) for c in cnpjs_pedido if val.normaliza_cnpj(c)}
+            for candidato in candidatos_distintos:
+                dados_forn = self.bpms.consultar_fornecedor_por_cnpj(candidato)
+                nomes = [d.get("AGN_ST_FANTASIA", "") for d in dados_forn] + [d.get("AGN_ST_NOME", "") for d in dados_forn]
+                if br.nome_fornecedor_confere(nomes, fantasia_pedido):
+                    emitente_ok = True
+                    cnpj_confirmado_via_api = candidato
+                    log.info(sanitize_emoji("  │  ℹ️  CNPJ %s confirmado via cadastro de fornecedor (nome fantasia bate: %s)"), candidato, fantasia_pedido)
+                    break
+
+        if not emitente_ok:
             log.warning(sanitize_emoji("  │  ⚠️  CNPJ do emitente divergente - bloqueio ativado"))
             msg = "CNPJ do emitente não bate com o esperado"
             detalhes = {
                 "CNPJ do fornecedor do pedido": cnpj_forn,
-                "CNPJ do emitente identificado no documento fiscal": contexto["cnpj_emitente"]
+                "CNPJ do emitente identificado no documento fiscal": contexto["cnpj_emitente"],
+                "Outros CNPJs lidos nos anexos do pedido": ", ".join(sorted(set(cnpjs_pedido))),
             }
             self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
             res.deve_lancar = False
@@ -384,11 +460,16 @@ class LancamentoController:
         log.info(sanitize_emoji("  │  ✓ CNPJ emitente válido"))
 
         # Validação: CNPJ Tomador x Filial
-        log.info("  ├─ Validação 3: CNPJ Tomador x Filial...")
+        log.info("  ├─ Validação 4: CNPJ Tomador x Filial...")
         log.info("  │  ├─ CNPJ Documento: %s", contexto["cnpj_tomador"])
         log.info("  │  ├─ Nome Tomador: %s", contexto["nome_tomador"])
         log.info("  │  └─ CNPJ Esperado: %s", cnpj_filial)
-        if not br.valida_tomador_x_filial(contexto["cnpj_tomador"], contexto["nome_tomador"], filial, cnpj_filial):
+        tomador_ok = br.valida_tomador_x_filial(contexto["cnpj_tomador"], contexto["nome_tomador"], filial, cnpj_filial)
+        candidatos_tomador = tomador_candidatos_pedido or [(contexto["cnpj_tomador"], contexto["nome_tomador"])]
+        if not tomador_ok and br.valida_tomador_x_filial_multi(candidatos_tomador, filial, cnpj_filial):
+            log.info(sanitize_emoji("  │  ℹ️  CNPJ do documento selecionado divergente, mas outro anexo do pedido confirma a filial"))
+            tomador_ok = True
+        if not tomador_ok:
             log.warning(sanitize_emoji("  │  ⚠️  CNPJ do tomador divergente - bloqueio ativado"))
             msg = "CNPJ do tomador não bate com o esperado"
             detalhes = {
@@ -404,7 +485,7 @@ class LancamentoController:
         log.info(sanitize_emoji("  │  ✓ CNPJ tomador válido"))
 
         # Validação: Condição de Pagamento ≤ 7 dias
-        log.info("  ├─ Validação 4: Condição de Pagamento ≤ 7 dias...")
+        log.info("  ├─ Validação 5: Condição de Pagamento ≤ 7 dias...")
         log.info("  │  ├─ Data Documento: %s", contexto["data_documento"])
         log.info("  │  ├─ Cond. Pagamento: %s", contexto["cond_pagto"])
         log.info("  │  └─ Bloqueio 7d (item): %s", contexto["bloqueia_7d"])
@@ -425,6 +506,54 @@ class LancamentoController:
             log.info("  └─ Status final: %s (registrado no BD)", res.status)
             return res
         log.info(sanitize_emoji("  │  ✓ Condição de pagamento válida (> 7 dias)"))
+
+        # Validação: Condição de Pagamento x Vencimento do Boleto
+        log.info("  ├─ Validação 6: Condição de Pagamento x Vencimento do Boleto...")
+        cond_ok, cond_esperada = br.valida_cond_pagto_por_vencimento(
+            contexto["cond_pagto"], contexto["data_documento"], data_vencimento_boleto)
+        if not cond_ok:
+            log.warning(sanitize_emoji("  │  ⚠️  Condição de pagamento divergente do vencimento do boleto - bloqueio ativado"))
+            msg = "Condição de pagamento do pedido não confere com o vencimento do boleto anexado"
+            detalhes = {
+                "Condição de pagamento cadastrada no pedido": contexto["cond_pagto"],
+                "Condição de pagamento calculada pelo vencimento do boleto": cond_esperada,
+                "Data do documento": contexto["data_documento"],
+                "Data de vencimento do boleto": data_vencimento_boleto,
+            }
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+            # Registrar no BD como sucesso para não reprocessar
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                erro=f"Motivo: Condição de pagamento divergente (cadastrada={contexto['cond_pagto']}, calculada={cond_esperada})")
+            res.deve_lancar = False
+            res.status = "CondPagtoDivergente"
+            log.info("  └─ Status final: %s (registrado no BD)", res.status)
+            return res
+        log.info(sanitize_emoji("  │  ✓ Condição de pagamento confere (ou sem boleto/código especial para comparar)"))
+
+        # Validação: Parcelas por Boleto (pagamento rateado em múltiplos boletos)
+        log.info("  ├─ Validação 7: Parcelas por Boleto...")
+        parcelas_boleto, soma_ok, soma_calculada = br.montar_parcelas_por_boletos(
+            payload.get("numNota", ""), boletos or [], payload.get("totalNota", "0"))
+        if parcelas_boleto and not soma_ok:
+            log.warning(sanitize_emoji("  │  ⚠️  Soma dos boletos não confere com o Total da Fatura - bloqueio ativado"))
+            msg = "Soma dos valores dos boletos anexados não confere com o Total da Fatura"
+            detalhes = {
+                "Total da Fatura (NF)": payload.get("totalNota", "0"),
+                "Soma dos boletos anexados": soma_calculada,
+                "Quantidade de boletos": str(len(parcelas_boleto)),
+            }
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                erro=f"Motivo: Soma dos boletos ({soma_calculada}) diverge do Total da Fatura ({payload.get('totalNota', '0')})")
+            res.deve_lancar = False
+            res.status = "ParcelasBoletoDivergente"
+            log.info("  └─ Status final: %s (registrado no BD)", res.status)
+            return res
+        if parcelas_boleto:
+            payload["parcelas"] = parcelas_boleto
+            log.info(sanitize_emoji("  │  ✓ %d parcela(s) montada(s) a partir dos boletos anexados"), len(parcelas_boleto))
+        else:
+            log.info(sanitize_emoji("  │  ✓ Parcela única (0 ou 1 boleto anexado)"))
         log.info("  └─ Todas as validações passaram")
 
         # ═══════════════════════════════════════════════════════════════════

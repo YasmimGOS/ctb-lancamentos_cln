@@ -42,6 +42,22 @@ class IntegraBpmsService:
         resp.raise_for_status()
         return (resp.json() or {}).get("data", []) or []
 
+    def consultar_fornecedor_por_cnpj(self, cnpj: str) -> list[dict]:
+        """Consulta o cadastro de fornecedor pelo CNPJ (validação de leitura de CNPJ da IA).
+
+        Falha aberta: em qualquer erro (rede, timeout, CNPJ não encontrado), retorna [] e quem
+        chama deve tratar como "sem confirmação disponível", sem bloquear o fluxo por isso.
+        """
+        try:
+            resp = request_json("POST", self.s.bpms_getdadosfornecedorvdois_url,
+                                headers={"Authorization": self.s.bpms_token},
+                                json_body={"cnpj": str(cnpj)})
+            resp.raise_for_status()
+            return (resp.json() or {}).get("data", []) or []
+        except Exception as exc:  # noqa: BLE001
+            log.warning(sanitize_emoji("⚠️  Falha ao consultar fornecedor por CNPJ %s: %s"), cnpj, exc)
+            return []
+
     def registrar(self, register_id: str, status: str, num_pedido: str, num_doc: str = "", erro: str = "") -> None:
         if self.s.modo_teste:
             log.info("[MODO_TESTE] registrar BD status=%s pedido=%s doc=%s", status, num_pedido, num_doc)
