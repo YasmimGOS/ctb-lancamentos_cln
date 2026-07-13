@@ -149,7 +149,6 @@ activemq-data/
 
 # Environments
 config/.env
-config/.env.example
 .env
 .envrc
 .venv

@@ -3,12 +3,49 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
+import re
 import sys
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 _CONFIGURED = False
+_IS_WINDOWS = platform.system() == "Windows"
+
+
+def sanitize_emoji(msg: str) -> str:
+    """Remove emojis da mensagem se executando em Linux.
+
+    No Windows, mantém os emojis.
+    No Linux, remove para evitar problemas de renderização no terminal.
+
+    Args:
+        msg: Mensagem que pode conter emojis
+
+    Returns:
+        Mensagem sanitizada (sem emojis no Linux, com emojis no Windows)
+    """
+    if _IS_WINDOWS:
+        return msg
+
+    # Padrão regex para remover emojis comuns
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F300-\U0001F9FF"  # Emojis diversos
+        "\U0001F600-\U0001F64F"  # Emoticons
+        "\U0001F680-\U0001F6FF"  # Símbolos de transporte
+        "\U00002600-\U000027BF"  # Símbolos diversos
+        "\U0001F1E0-\U0001F1FF"  # Bandeiras
+        "\U0001F900-\U0001F9FF"  # Símbolos suplementares
+        "\U00002300-\U000023FF"  # Símbolos técnicos diversos
+        "\U0000FE00-\U0000FE0F"  # Seletores de variação
+        "\U0001F200-\U0001F2FF"  # Ideogramas circulados
+        "]+",
+        flags=re.UNICODE,
+    )
+
+    return emoji_pattern.sub("", msg).strip()
 
 
 def _configure() -> None:

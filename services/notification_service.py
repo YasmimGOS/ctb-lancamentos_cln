@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from config import get_settings
-from utils import get_logger, formatter as fmt
+from utils import get_logger, formatter as fmt, sanitize_emoji
 from services.http_client import request_json
 
 log = get_logger("teams")
@@ -58,13 +58,13 @@ class NotificationService:
 
         if not self.s.webhook_url or not pode_enviar:
             log.info("━" * 100)
-            log.info("📢 MENSAGEM TEAMS (não enviada - webhook desabilitado%s)", " | MODO TESTE" if self.s.modo_teste else "")
+            log.info(sanitize_emoji("📢 MENSAGEM TEAMS (não enviada - webhook desabilitado%s)"), " | MODO TESTE" if self.s.modo_teste else "")
             log.info("   %s", mensagem)
             log.info("━" * 100)
             return
 
         log.info("━" * 100)
-        log.info("📢 ENVIANDO MENSAGEM PARA TEAMS")
+        log.info(sanitize_emoji("📢 ENVIANDO MENSAGEM PARA TEAMS"))
         log.info("   %s", mensagem)
         log.info("━" * 100)
 
@@ -74,9 +74,9 @@ class NotificationService:
 
         try:
             request_json("POST", self.s.webhook_url, json_body=body, timeout=30)
-            log.info("✓ Mensagem Teams enviada com sucesso")
+            log.info(sanitize_emoji("✓ Mensagem Teams enviada com sucesso"))
         except Exception as exc:  # noqa: BLE001
-            log.warning("❌ Falha ao notificar Teams: %s", exc)
+            log.warning(sanitize_emoji("❌ Falha ao notificar Teams: %s"), exc)
 
     def sucesso(self, msg: str, pedido: Any = None, num_nota: str = "", cod_transacao: str = "", pk_mega: str = "") -> None:
         """Notificação de sucesso (✅).

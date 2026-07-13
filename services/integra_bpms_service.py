@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from config import get_settings
-from utils import get_logger
+from utils import get_logger, sanitize_emoji
 from services.http_client import request_json
 
 log = get_logger("integra_bpms")
@@ -58,7 +58,7 @@ class IntegraBpmsService:
                                 json_body={"register_id": register_id, "status": status,
                                            "num_pedido": str(num_pedido), "num_doc": str(num_doc), "error": erro_sanitizado})
             resp.raise_for_status()
-            log.info("✓ Registro BD enviado: status=%s pedido=%s doc=%s", status, num_pedido, num_doc)
+            log.info(sanitize_emoji("✓ Registro BD enviado: status=%s pedido=%s doc=%s"), status, num_pedido, num_doc)
         except Exception as exc:  # noqa: BLE001
-            log.error("❌ Falha ao registrar no BD (pedido %s): %s", num_pedido, exc)
+            log.error(sanitize_emoji("❌ Falha ao registrar no BD (pedido %s): %s"), num_pedido, exc)
             log.error("   Dados que tentaram ser enviados: status=%s, num_doc=%s, erro=%s", status, num_doc, erro_sanitizado[:100])

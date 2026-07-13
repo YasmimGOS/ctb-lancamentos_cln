@@ -21,7 +21,7 @@ from services.integra_bpms_service import IntegraBpmsService
 from services.integra_megaintegrador_service import IntegraMegaIntegradorService
 from services.notification_service import NotificationService
 from utils import formatter as fmt
-from utils import get_logger
+from utils import get_logger, sanitize_emoji
 from utils import validators as val
 
 log = get_logger("controller")
@@ -38,28 +38,28 @@ class LancamentoController:
         self.teams = teams or NotificationService(self.s, self.id_disparo)
 
     def executar_lote(self) -> list[ResultadoPedido]:
-        log.info("🚀 Iniciando obtenção de lista de pedidos...")
+        log.info(sanitize_emoji("🚀 Iniciando obtenção de lista de pedidos..."))
         try:
             lista = self.bpms.obter_lista_pedidos()
         except Exception as exc:  # noqa: BLE001
-            log.exception("❌ Falha ao obter lista de pedidos: %s", exc)
+            log.exception(sanitize_emoji("❌ Falha ao obter lista de pedidos: %s"), exc)
             self.teams.erro_obter_pedidos()
             return []
 
         if not lista:
-            log.info("ℹ️  Nenhum pedido aguardando CLN.")
+            log.info(sanitize_emoji("ℹ️  Nenhum pedido aguardando CLN."))
             return []
 
-        log.info("✓ Lista de pedidos obtida: %d pedido(s) disponível(is)", len(lista))
+        log.info(sanitize_emoji("✓ Lista de pedidos obtida: %d pedido(s) disponível(is)"), len(lista))
 
         pedidos = power_flow.selecionar_pedidos(lista, self.s.filtro_pedidos_list, self.s.limite_pedidos)
-        log.info("📋 Pedidos selecionados para processamento: %d", len(pedidos))
+        log.info(sanitize_emoji("📋 Pedidos selecionados para processamento: %d"), len(pedidos))
 
         workers = max(1, int(self.s.max_workers))
         if workers == 1 or len(pedidos) <= 1:
             return [self._processar_seguro(p) for p in pedidos]
 
-        log.info("🔀 Processando %s pedido(s) em paralelo (max_workers=%s).", len(pedidos), workers)
+        log.info(sanitize_emoji("🔀 Processando %s pedido(s) em paralelo (max_workers=%s)."), len(pedidos), workers)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(self._processar_seguro, pedidos))
 
@@ -69,7 +69,7 @@ class LancamentoController:
             return self.processar_pedido(pedido)
         except Exception as exc:  # noqa: BLE001
             pdc = pedido.get("PDC_IN_CODIGO")
-            log.exception("💥 Erro inesperado ao processar pedido %s: %s", pdc, exc)
+            log.exception(sanitize_emoji("💥 Erro inesperado ao processar pedido %s: %s"), pdc, exc)
             return ResultadoPedido(pedido=pdc, filial=pedido.get("FIL_IN_CODIGO"),
                                    deve_lancar=False, status="Excecao", mensagem=str(exc))
 
@@ -100,53 +100,53 @@ class LancamentoController:
         # ═══════════════════════════════════════════════════════════════════
         # VERIFICAÇÃO INICIAL: Consultar se pedido já foi processado
         # ═══════════════════════════════════════════════════════════════════
-        log.info("[VERIFICAÇÃO PRÉVIA] 🔍 Consultando se pedido %s já foi processado no BD...", num_pedido_bd)
+        log.info(sanitize_emoji("[VERIFICAÇÃO PRÉVIA] 🔍 Consultando se pedido %s já foi processado no BD..."), num_pedido_bd)
         try:
             registros_bd = self.bpms.consultar_bd(num_pedido_bd)
             if registros_bd:
-                log.info("  ⏭️  Pedido %s já consta no BD. Pulando processamento.", num_pedido_bd)
+                log.info(sanitize_emoji("  ⏭️  Pedido %s já consta no BD. Pulando processamento."), num_pedido_bd)
                 res.status = "JaProcessado"
                 res.deve_lancar = False
                 log.info("  └─ Status final: %s", res.status)
                 return res
-            log.info("  ✓ Pedido não encontrado no BD. Prosseguindo com processamento.")
+            log.info(sanitize_emoji("  ✓ Pedido não encontrado no BD. Prosseguindo com processamento."))
         except Exception as exc:  # noqa: BLE001
-            log.exception("  ⚠️  Erro ao consultar BD para pedido %s: %s. Prosseguindo mesmo assim.", num_pedido_bd, exc)
+            log.exception(sanitize_emoji("  ⚠️  Erro ao consultar BD para pedido %s: %s. Prosseguindo mesmo assim."), num_pedido_bd, exc)
 
         # ═══════════════════════════════════════════════════════════════════
         # ETAPA 1: Verificar REEMBOLSO
         # ═══════════════════════════════════════════════════════════════════
-        log.info("[ETAPA 1/7] 🔍 Verificando se é REEMBOLSO...")
+        log.info(sanitize_emoji("[ETAPA 1/7] 🔍 Verificando se é REEMBOLSO..."))
         if br.eh_reembolso(fantasia):
-            log.warning("  ⚠️  Pedido %s identificado como REEMBOLSO - bloqueio ativado", pdc)
+            log.warning(sanitize_emoji("  ⚠️  Pedido %s identificado como REEMBOLSO - bloqueio ativado"), pdc)
             self.teams.aviso("Pedido identificado como REEMBOLSO. NÃO será lançado automaticamente", pedido=pdc, tipo_negocio=True)
             res.deve_lancar = False
             res.status = "Reembolso"
             log.info("  └─ Status final: %s", res.status)
             return res
-        log.info("  ✓ Não é reembolso")
+        log.info(sanitize_emoji("  ✓ Não é reembolso"))
 
         # ═══════════════════════════════════════════════════════════════════
         # ETAPA 2: Obter Dados do Pedido
         # ═══════════════════════════════════════════════════════════════════
-        log.info("[ETAPA 2/7] 📦 Obtendo dados detalhados do pedido...")
+        log.info(sanitize_emoji("[ETAPA 2/7] 📦 Obtendo dados detalhados do pedido..."))
         try:
             dados_pedido = self.bpms.obter_dados_pedido(filial, pdc)
         except Exception as exc:  # noqa: BLE001
-            log.exception("  ❌ Erro ao obter dados do pedido %s: %s", pdc, exc)
+            log.exception(sanitize_emoji("  ❌ Erro ao obter dados do pedido %s: %s"), pdc, exc)
             self.teams.erro("Falha ao obter dados detalhados do pedido", pedido=pdc, tecnico=True)
             res.status = "ErroDadosPedido"
             log.info("  └─ Status final: %s", res.status)
             return res
 
         if not dados_pedido:
-            log.error("  ❌ Dados do pedido %s não encontrados", pdc)
+            log.error(sanitize_emoji("  ❌ Dados do pedido %s não encontrados"), pdc)
             self.teams.erro("Dados do pedido não encontrados", pedido=pdc, tecnico=True)
             res.status = "ErroDadosPedido"
             log.info("  └─ Status final: %s", res.status)
             return res
 
-        log.info("  ✓ Dados do pedido obtidos: %d item(ns)", len(dados_pedido))
+        log.info(sanitize_emoji("  ✓ Dados do pedido obtidos: %d item(ns)"), len(dados_pedido))
         log.info("  ├─ Item 1: Produto=%s, Qtd=%s, Valor=%s",
                  dados_pedido[0].get("PRODUTO", ""),
                  dados_pedido[0].get("QUANTIDADE_PEDIDO", ""),
@@ -157,17 +157,17 @@ class LancamentoController:
         # ═══════════════════════════════════════════════════════════════════
         # ETAPA 3: Consultar Anexos
         # ═══════════════════════════════════════════════════════════════════
-        log.info("[ETAPA 3/7] 📎 Consultando anexos do pedido...")
+        log.info(sanitize_emoji("[ETAPA 3/7] 📎 Consultando anexos do pedido..."))
         try:
             anexos = self.bpms.consultar_anexos(filial, agente, pdc, fmt.hoje_br(self.s.timezone))
         except Exception as exc:  # noqa: BLE001
-            log.exception("  ❌ Erro ao consultar anexos do pedido %s: %s", pdc, exc)
+            log.exception(sanitize_emoji("  ❌ Erro ao consultar anexos do pedido %s: %s"), pdc, exc)
             self.teams.erro_consultar_anexos(pdc)
             res.status = "ErroAnexos"
             log.info("  └─ Status final: %s", res.status)
             return res
 
-        log.info("  ✓ Anexos consultados: %d arquivo(s)", len(anexos))
+        log.info(sanitize_emoji("  ✓ Anexos consultados: %d arquivo(s)"), len(anexos))
 
         cnpj_forn = val.normaliza_cnpj(dados_pedido[0].get("CNPJ_CPF_FORNECEDOR", ""))
         cnpj_filial = val.normaliza_cnpj(dados_pedido[0].get("CNPJ_CPF_FILIAL", ""))
@@ -177,7 +177,7 @@ class LancamentoController:
         # ═══════════════════════════════════════════════════════════════════
         # ETAPA 4: Processar Anexos com IA
         # ═══════════════════════════════════════════════════════════════════
-        log.info("[ETAPA 4/7] 🤖 Processando anexos com IA...")
+        log.info(sanitize_emoji("[ETAPA 4/7] 🤖 Processando anexos com IA..."))
         payloads: list[dict] = []
         contexto: dict[str, Any] = {}
 
@@ -188,7 +188,7 @@ class LancamentoController:
 
             # Verificar se é imagem
             if nome.lower().endswith(IMAGENS):
-                log.warning("  ├─ ⚠️  Arquivo é imagem, só aceita PDF")
+                log.warning(sanitize_emoji("  ├─ ⚠️  Arquivo é imagem, só aceita PDF"))
                 detalhes_img = {"Arquivo": nome}
                 self.teams.aviso("Arquivo é imagem, só aceita PDF para leitura pela IA", pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes_img)
                 log.info("  └─")
@@ -198,10 +198,10 @@ class LancamentoController:
             log.info("  ├─ Base64 PDF: %d caracteres", len(base64_pdf))
 
             # Extração primária
-            log.info("  ├─ 🧠 Executando extração primária (IA 1ª chamada)...")
+            log.info(sanitize_emoji("  ├─ 🧠 Executando extração primária (IA 1ª chamada)..."))
             try:
                 ia_raw = self.ia.extrair_primaria(base64_pdf)
-                log.info("  │  ✓ Extração primária concluída")
+                log.info(sanitize_emoji("  │  ✓ Extração primária concluída"))
                 log.info("  │  ├─ tipoDocFiscal: %s", ia_raw.get("tipoDocFiscal", ""))
                 log.info("  │  ├─ numNota: %s", ia_raw.get("numNota", ""))
                 log.info("  │  ├─ valorTotalDocumento: %s", ia_raw.get("valorTotalDocumento", ""))
@@ -209,31 +209,31 @@ class LancamentoController:
                 log.info("  │  └─ JSON completo da IA (primária):")
                 log.info("  │     %s", json.dumps(ia_raw, indent=2, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001
-                log.exception("  │  ❌ Erro ao enviar Base64 para IA (pedido %s): %s", pdc, exc)
+                log.exception(sanitize_emoji("  │  ❌ Erro ao enviar Base64 para IA (pedido %s): %s"), pdc, exc)
                 self.teams.erro_ia_envio(pdc, nome)
                 log.info("  └─")
                 continue
 
             # Extração extra
-            log.info("  ├─ 🧠 Executando extração extra (IA 2ª chamada)...")
+            log.info(sanitize_emoji("  ├─ 🧠 Executando extração extra (IA 2ª chamada)..."))
             try:
                 extra_raw = self.ia.extrair_extra(base64_pdf)
-                log.info("  │  ✓ Extração extra concluída")
+                log.info(sanitize_emoji("  │  ✓ Extração extra concluída"))
                 log.info("  │  ├─ issRetido: %s", extra_raw.get("issRetido", False))
                 log.info("  │  ├─ valorISSRetido: %s", extra_raw.get("valorISSRetido", "0.00"))
                 log.info("  │  ├─ cnpjCpfTomador: %s", extra_raw.get("cnpjCpfTomador", ""))
                 log.info("  │  └─ JSON completo da IA (extra):")
                 log.info("  │     %s", json.dumps(extra_raw, indent=2, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001
-                log.exception("  │  ❌ Erro ao capturar resultado da IA (pedido %s): %s", pdc, exc)
+                log.exception(sanitize_emoji("  │  ❌ Erro ao capturar resultado da IA (pedido %s): %s"), pdc, exc)
                 self.teams.erro_ia_resultado(pdc)
                 log.info("  └─")
                 continue
 
             # Consolidar resposta IA
-            log.info("  ├─ 🔄 Consolidando respostas IA...")
+            log.info(sanitize_emoji("  ├─ 🔄 Consolidando respostas IA..."))
             ia_final, cnpj_emit, cnpj_tom, tipo_doc = etl.consolidar_resposta_ia(ia_raw, extra_raw, pdc)
-            log.info("  │  ✓ Consolidação concluída")
+            log.info(sanitize_emoji("  │  ✓ Consolidação concluída"))
             log.info("  │  ├─ Tipo Doc Final: %s", tipo_doc)
             log.info("  │  ├─ CNPJ Emitente: %s", cnpj_emit)
             log.info("  │  ├─ CNPJ Tomador: %s", cnpj_tom)
@@ -243,7 +243,7 @@ class LancamentoController:
 
             # Calcular ação e conta
             acao_conta = br.calcular_acao_e_conta(tipo_doc, cond_pagto)
-            log.info("  ├─ 💼 Ação e Conta calculadas")
+            log.info(sanitize_emoji("  ├─ 💼 Ação e Conta calculadas"))
             log.info("  │  ├─ contasPagarTipoDoc: %s", acao_conta.get("contasPagarTipoDoc", ""))
             log.info("  │  └─ acao: %s", acao_conta.get("acao", ""))
 
@@ -268,7 +268,7 @@ class LancamentoController:
                     if abs(valor_nota - valor_item) < 0.01:
                         item_match = dp
                         res._itens_usados_vibra.add(idx)
-                        log.info("  │  ✓ Match VIBRA: Nota R$ %s -> Item %s (Pedido R$ %s)",
+                        log.info(sanitize_emoji("  │  ✓ Match VIBRA: Nota R$ %s -> Item %s (Pedido R$ %s)"),
                                 fmt.format_number(valor_nota),
                                 dp.get("ITEM_SEQUENCIA", ""),
                                 fmt.format_number(valor_item))
@@ -277,13 +277,13 @@ class LancamentoController:
                 if item_match:
                     dados_pedido_filtrado = [item_match]
                 else:
-                    log.warning("  │  ⚠️  VIBRA: Nenhum item do pedido match com valor R$ %s",
+                    log.warning(sanitize_emoji("  │  ⚠️  VIBRA: Nenhum item do pedido match com valor R$ %s"),
                                fmt.format_number(valor_nota))
 
             # Montar payload
-            log.info("  ├─ 📝 Montando payload de recebimento...")
+            log.info(sanitize_emoji("  ├─ 📝 Montando payload de recebimento..."))
             payload, bloq7 = etl.montar_payload(pedido, dados_pedido_filtrado, ia_final, cnpj_emit, tipo_doc, acao_conta, "", self.s.timezone)
-            log.info("  │  ✓ Payload montado")
+            log.info(sanitize_emoji("  │  ✓ Payload montado"))
             log.info("  │  ├─ Bloqueio 7 dias: %s", bloq7)
             log.info("  │  ├─ Total Nota: %s", payload.get("totalNota", ""))
             log.info("  │  ├─ Valor Mercadoria: %s", payload.get("valorMercadoria", ""))
@@ -310,7 +310,7 @@ class LancamentoController:
         # ═══════════════════════════════════════════════════════════════════
         # ETAPA 5: Agregar Payloads (VIBRA ENERGIA) e Priorizar
         # ═══════════════════════════════════════════════════════════════════
-        log.info("[ETAPA 5/7] 🎯 Processando payloads...")
+        log.info(sanitize_emoji("[ETAPA 5/7] 🎯 Processando payloads..."))
 
         # Log dos tipos de documentos encontrados
         if len(payloads) > 1:
@@ -324,7 +324,7 @@ class LancamentoController:
         payloads = power_flow.agregar_payloads_vibra_energia(payloads, cnpj_emit_final)
 
         if len(payloads) < payloads_originais:
-            log.info("  ✓ Agregação VIBRA ENERGIA executada")
+            log.info(sanitize_emoji("  ✓ Agregação VIBRA ENERGIA executada"))
             log.info("  │  ├─ Payloads originais: %d", payloads_originais)
             log.info("  │  ├─ Payloads após agregação: %d", len(payloads))
             log.info("  │  ├─ Notas consolidadas: %s", payloads[0].get("_notas_agregadas", ""))
@@ -332,12 +332,12 @@ class LancamentoController:
             log.info("  │  ├─ Valor Mercadoria (recalculado): R$ %s", payloads[0].get("valorMercadoria", ""))
             log.info("  │  └─ Total Nota agregado: R$ %s", payloads[0].get("totalNota", ""))
         elif payloads_originais > 1:
-            log.info("  ℹ️  Agregação NÃO aplicada (múltiplos payloads mantidos para priorização)")
+            log.info(sanitize_emoji("  ℹ️  Agregação NÃO aplicada (múltiplos payloads mantidos para priorização)"))
 
         # Priorizar payload
         payload = power_flow.priorizar_payload(payloads)
         if not payload:
-            log.error("  ❌ Nenhum payload válido gerado")
+            log.error(sanitize_emoji("  ❌ Nenhum payload válido gerado"))
             self.teams.erro_definir_payload(pdc)
             res.status = "SemPayload"
             log.info("  └─ Status final: %s", res.status)
@@ -345,32 +345,32 @@ class LancamentoController:
 
         # Recuperar o contexto do payload priorizado
         contexto = payload.get("_contexto", {})
-        log.info("  ✓ Payload selecionado: tipoDocFiscal=%s", payload.get("tipoDocFiscal", ""))
+        log.info(sanitize_emoji("  ✓ Payload selecionado: tipoDocFiscal=%s"), payload.get("tipoDocFiscal", ""))
         res.tipoDocFiscal = contexto.get("tipo_doc", "")
         res.num_doc = payload.get("numNota", "")
 
         # ═══════════════════════════════════════════════════════════════════
         # ETAPA 6: Validações de Negócio
         # ═══════════════════════════════════════════════════════════════════
-        log.info("[ETAPA 6/7] ✅ Executando validações de negócio...")
+        log.info(sanitize_emoji("[ETAPA 6/7] ✅ Executando validações de negócio..."))
 
         # Validação: Apólice
         log.info("  ├─ Validação 1: Verificando se é APÓLICE...")
         if br.eh_apolice(contexto.get("tipo_doc", "")):
-            log.warning("  │  ⚠️  Documento é APÓLICE - bloqueio ativado")
+            log.warning(sanitize_emoji("  │  ⚠️  Documento é APÓLICE - bloqueio ativado"))
             self.teams.aviso("Documento identificado como Apólice de Seguro. NÃO será lançado automaticamente", pedido=pdc, tipo_negocio=True)
             res.deve_lancar = False
             res.status = "Apolice"
             log.info("  └─ Status final: %s", res.status)
             return res
-        log.info("  │  ✓ Não é apólice")
+        log.info(sanitize_emoji("  │  ✓ Não é apólice"))
 
         # Validação: CNPJ Emitente x Fornecedor
         log.info("  ├─ Validação 2: CNPJ Emitente x Fornecedor...")
         log.info("  │  ├─ CNPJ Documento: %s", contexto["cnpj_emitente"])
         log.info("  │  └─ CNPJ Esperado: %s", cnpj_forn)
         if not br.valida_emitente_x_fornecedor(contexto["cnpj_emitente"], cnpj_forn):
-            log.warning("  │  ⚠️  CNPJ do emitente divergente - bloqueio ativado")
+            log.warning(sanitize_emoji("  │  ⚠️  CNPJ do emitente divergente - bloqueio ativado"))
             msg = "CNPJ do emitente não bate com o esperado"
             detalhes = {
                 "CNPJ do fornecedor do pedido": cnpj_forn,
@@ -381,7 +381,7 @@ class LancamentoController:
             res.status = "CNPJEmitente"
             log.info("  └─ Status final: %s", res.status)
             return res
-        log.info("  │  ✓ CNPJ emitente válido")
+        log.info(sanitize_emoji("  │  ✓ CNPJ emitente válido"))
 
         # Validação: CNPJ Tomador x Filial
         log.info("  ├─ Validação 3: CNPJ Tomador x Filial...")
@@ -389,7 +389,7 @@ class LancamentoController:
         log.info("  │  ├─ Nome Tomador: %s", contexto["nome_tomador"])
         log.info("  │  └─ CNPJ Esperado: %s", cnpj_filial)
         if not br.valida_tomador_x_filial(contexto["cnpj_tomador"], contexto["nome_tomador"], filial, cnpj_filial):
-            log.warning("  │  ⚠️  CNPJ do tomador divergente - bloqueio ativado")
+            log.warning(sanitize_emoji("  │  ⚠️  CNPJ do tomador divergente - bloqueio ativado"))
             msg = "CNPJ do tomador não bate com o esperado"
             detalhes = {
                 "CNPJ da filial": cnpj_filial,
@@ -401,7 +401,7 @@ class LancamentoController:
             res.status = "CNPJTomador"
             log.info("  └─ Status final: %s", res.status)
             return res
-        log.info("  │  ✓ CNPJ tomador válido")
+        log.info(sanitize_emoji("  │  ✓ CNPJ tomador válido"))
 
         # Validação: Condição de Pagamento ≤ 7 dias
         log.info("  ├─ Validação 4: Condição de Pagamento ≤ 7 dias...")
@@ -411,7 +411,7 @@ class LancamentoController:
         deve_por_venc = br.calcular_deve_lancar_por_vencimento(
             contexto["cnpj_emitente"], contexto["data_documento"], contexto["cond_pagto"], self.s.timezone)
         if contexto["bloqueia_7d"] or not deve_por_venc:
-            log.warning("  │  ⚠️  Condição de pagamento ≤ 7 dias - bloqueio ativado")
+            log.warning(sanitize_emoji("  │  ⚠️  Condição de pagamento ≤ 7 dias - bloqueio ativado"))
             msg = "Condição de pagamento ≤ 7 dias. Lançamento bloqueado"
             detalhes = {
                 "Data do documento": contexto["data_documento"],
@@ -424,13 +424,13 @@ class LancamentoController:
             res.status = "CondPagto7Dias"
             log.info("  └─ Status final: %s (registrado no BD)", res.status)
             return res
-        log.info("  │  ✓ Condição de pagamento válida (> 7 dias)")
+        log.info(sanitize_emoji("  │  ✓ Condição de pagamento válida (> 7 dias)"))
         log.info("  └─ Todas as validações passaram")
 
         # ═══════════════════════════════════════════════════════════════════
         # ETAPA 7: Lançamento no Mega Integrador
         # ═══════════════════════════════════════════════════════════════════
-        log.info("[ETAPA 7/7] 🚀 Lançando no Mega Integrador...")
+        log.info(sanitize_emoji("[ETAPA 7/7] 🚀 Lançando no Mega Integrador..."))
 
         # Limpar campos internos antes de enviar
         payload.pop("_contexto", None)
@@ -448,7 +448,7 @@ class LancamentoController:
             data = (body or {}).get("data", {}) if isinstance(body, dict) else {}
             cod_trans = data.get('codTransacao', '')
             pk_mega = data.get('pkMega', '')
-            log.info("  ✓ Lançamento realizado com SUCESSO")
+            log.info(sanitize_emoji("  ✓ Lançamento realizado com SUCESSO"))
             log.info("  ├─ Nota Fiscal: %s", num_nota)
             log.info("  ├─ Código Transação: %s", cod_trans)
             log.info("  └─ PK Mega: %s", pk_mega)
@@ -465,7 +465,7 @@ class LancamentoController:
             erros = str(body.get("errors") or body.get("mensagem") or body.get("title") or body)
 
         if status_code == 400 and "já foi cadastrada" in erros:
-            log.warning("  ⚠️  Nota Fiscal já cadastrada no sistema")
+            log.warning(sanitize_emoji("  ⚠️  Nota Fiscal já cadastrada no sistema"))
             msg = "Nota Fiscal já foi cadastrada no sistema"
             detalhes_nf = {"Nota Fiscal": num_nota}
             self.teams.aviso(msg, pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes_nf)
@@ -475,7 +475,7 @@ class LancamentoController:
             return res
 
         if status_code == 415:
-            log.error("  ❌ Erro 415 - Unsupported Media Type")
+            log.error(sanitize_emoji("  ❌ Erro 415 - Unsupported Media Type"))
             msg = "Erro 415 - Unsupported Media Type ao lançar recebimento"
             detalhes = {
                 "Nota Fiscal": num_nota,
@@ -488,7 +488,7 @@ class LancamentoController:
             log.info("╰─ Status final: %s", res.status)
             return res
 
-        log.error("  ❌ Falha ao lançar recebimento | Status HTTP: %d", status_code)
+        log.error(sanitize_emoji("  ❌ Falha ao lançar recebimento | Status HTTP: %d"), status_code)
         log.error("  └─ Erro: %s", erros)
         msg = "Falha ao realizar lançamento de recebimento"
         detalhes = {

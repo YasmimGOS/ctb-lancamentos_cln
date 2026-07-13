@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from config import get_settings
-from utils import get_logger
+from utils import get_logger, sanitize_emoji
 from services.http_client import request_json
 
 log = get_logger("ia")
@@ -41,7 +41,7 @@ class IaService:
         if self.s.ia_max_tokens:
             corpo["max_tokens"] = self.s.ia_max_tokens
 
-        log.info("📤 Enviando PDF para IA (tamanho: %d caracteres)...", len(base64_pdf))
+        log.info(sanitize_emoji("📤 Enviando PDF para IA (tamanho: %d caracteres)..."), len(base64_pdf))
         resp = request_json("POST", self.s.ia_submit_url, headers=headers, json_body=corpo,
                             timeout=120, tentativas=3, intervalo_s=30)
         resp.raise_for_status()
@@ -49,7 +49,7 @@ class IaService:
         if not job_id:
             raise RuntimeError("IA nao retornou job_id")
 
-        log.info("⏳ Job IA iniciado: %s | Aguardando processamento...", job_id)
+        log.info(sanitize_emoji("⏳ Job IA iniciado: %s | Aguardando processamento..."), job_id)
         status_base = self.s.ia_status_url.rstrip("/")
 
         # Polling com backoff exponencial (opcional)
@@ -60,7 +60,7 @@ class IaService:
             time.sleep(intervalo_atual)
             tempo_total += intervalo_atual
 
-            log.info("🔍 Verificando status IA [%d/%d] (%.1fs decorridos)...",
+            log.info(sanitize_emoji("🔍 Verificando status IA [%d/%d] (%.1fs decorridos)..."),
                      tentativa, self.s.ia_poll_max_tentativas, tempo_total)
 
             st = request_json("GET", f"{status_base}/{job_id}", headers=headers, timeout=60)
@@ -69,7 +69,7 @@ class IaService:
             status = body.get("status", "UNKNOWN")
 
             if status == "COMPLETED":
-                log.info("✅ Job IA concluído com sucesso em %.1fs", tempo_total)
+                log.info(sanitize_emoji("✅ Job IA concluído com sucesso em %.1fs"), tempo_total)
                 return _limpar_json(body.get("intel_answer", "{}"))
 
             log.info("   Status atual: %s", status)
