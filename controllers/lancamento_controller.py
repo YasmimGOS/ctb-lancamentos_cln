@@ -444,6 +444,20 @@ class LancamentoController:
                     log.info(sanitize_emoji("  │  ℹ️  CNPJ %s confirmado via cadastro de fornecedor (nome fantasia bate: %s)"), candidato, fantasia_pedido)
                     break
 
+        # Última medida: consulta o cadastro de fornecedor pelo CNPJ do PRÓPRIO pedido
+        # (cnpj_forn) - se o nome fantasia retornado bater com o do pedido, confia no CNPJ
+        # cadastrado no pedido (provavelmente a leitura do documento é que está errada)
+        if not emitente_ok:
+            cnpj_forn_norm = val.normaliza_cnpj(cnpj_forn)
+            dados_forn_pedido = self.bpms.consultar_fornecedor_por_cnpj(cnpj_forn_norm) if cnpj_forn_norm else []
+            nomes_pedido = [d.get("AGN_ST_FANTASIA", "") for d in dados_forn_pedido] + [d.get("AGN_ST_NOME", "") for d in dados_forn_pedido]
+            if br.nome_fornecedor_confere(nomes_pedido, fantasia_pedido):
+                num_cnpj_cadastro = val.normaliza_cnpj(dados_forn_pedido[0].get("NUM_CNPJ", "")) if dados_forn_pedido else ""
+                if num_cnpj_cadastro:
+                    emitente_ok = True
+                    cnpj_confirmado_via_api = num_cnpj_cadastro
+                    log.info(sanitize_emoji("  │  ℹ️  CNPJ do pedido (%s) confirmado via cadastro de fornecedor (nome fantasia bate: %s)"), num_cnpj_cadastro, fantasia_pedido)
+
         if not emitente_ok:
             log.warning(sanitize_emoji("  │  ⚠️  CNPJ do emitente divergente - bloqueio ativado"))
             msg = "CNPJ do emitente não bate com o esperado"
