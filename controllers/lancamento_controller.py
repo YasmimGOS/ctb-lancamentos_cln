@@ -25,7 +25,7 @@ from utils import get_logger, sanitize_emoji
 from utils import validators as val
 
 log = get_logger("controller")
-IMAGENS = (".png", ".jpg", ".jpeg")
+IMAGENS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif")
 
 
 class LancamentoController:
@@ -182,6 +182,7 @@ class LancamentoController:
         log.info(sanitize_emoji("[ETAPA 4/7] 🤖 Processando anexos com IA..."))
         payloads: list[dict] = []
         contexto: dict[str, Any] = {}
+        anexos_imagem: list[str] = []
 
         for idx, anexo in enumerate(anexos, 1):
             log.info("  ┌─ Anexo %d/%d", idx, len(anexos))
@@ -190,9 +191,11 @@ class LancamentoController:
 
             # Verificar se é imagem
             if nome.lower().endswith(IMAGENS):
-                log.warning(sanitize_emoji("  ├─ ⚠️  Arquivo é imagem, só aceita PDF"))
+                log.warning(sanitize_emoji("  ├─ ⚠️  Arquivo com extensão de imagem, não é processado pelo RPA"))
+                anexos_imagem.append(nome)
                 detalhes_img = {"Arquivo": nome}
-                self.teams.aviso("Arquivo é imagem, só aceita PDF para leitura pela IA", pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes_img)
+                self.teams.aviso("Arquivo com extensão de imagem não é processado pelo RPA - requer execução manual",
+                                  pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes_img)
                 log.info("  └─")
                 continue
 
@@ -332,6 +335,14 @@ class LancamentoController:
             payloads_para_lancar = [payload_priorizado] if payload_priorizado else []
 
         if not payloads_para_lancar:
+            if anexos_imagem and len(anexos_imagem) == len(anexos):
+                log.warning(sanitize_emoji("  ⚠️  Anexos são imagem - execução manual necessária"))
+                self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                    erro="Arquivo com extensão de imagem")
+                res.deve_lancar = False
+                res.status = "ImagemManual"
+                log.info("  └─ Status final: %s (registrado no BD)", res.status)
+                return [res]
             log.error(sanitize_emoji("  ❌ Nenhum payload válido gerado"))
             self.teams.erro_definir_payload(pdc)
             res.status = "SemPayload"

@@ -67,6 +67,7 @@ def aplicar_iss_do_valor_retido(ia: dict, extra: dict) -> dict:
     ia["baseISS"] = fmt.format_number(base)
     ia["percentualISS"] = perc
     ia["valorISSDevido"] = fmt.format_number(retido)
+    ia["totalISSDevido"] = fmt.format_number(retido)
     return ia
 
 

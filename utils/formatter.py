@@ -92,7 +92,7 @@ def disparo_data_hora(tz: str = "America/Sao_Paulo") -> str:
 
 
 def id_disparo(tz: str = "America/Sao_Paulo") -> str:
-    return "lancamentoCLN_GoLive_" + agora(tz).strftime("%Y%m%d_%H%M%S")
+    return "lancamentoCLN_" + agora(tz).strftime("%Y%m%d_%H%M%S")
 
 
 def datetime_disparo_formatado(tz: str = "America/Sao_Paulo") -> str:

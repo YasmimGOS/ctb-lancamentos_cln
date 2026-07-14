@@ -152,7 +152,12 @@ Classificação de `tipoDocFiscal`:
 4. CT-e Outros Serviços: "CT-EOS".
 5. Nota Fiscal de Serviços da Prefeitura de Goiânia (determinado pelo município da empresa do
    prestador de serviços e não deve ser confundido com `municipioPrestacao`): "NFS-EG".
-6. Nota Fiscal de Serviços de outro município: "NFS-E".
+   ATENÇÃO - cidade do prestador deve ser EXATAMENTE "Goiânia" (a capital): municípios que apenas
+   contêm a palavra "Goiânia" no nome, mas são cidades DIFERENTES, NUNCA geram "NFS-EG" - por
+   exemplo "Aparecida de Goiânia", "Goianésia" e "Goianira" são municípios distintos de Goiânia.
+   Ler o nome do município do prestador por completo, com atenção, antes de classificar.
+6. Nota Fiscal de Serviços de outro município (inclusive Aparecida de Goiânia, Goianésia,
+   Goianira e qualquer município que não seja exatamente "Goiânia"): "NFS-E".
 7. Nota Fiscal de Serviço de Telecomunicação: "NFSTE".
 8. Nota Fiscal de Energia Elétrica Eletrônica: "NF3E".
 9. Nota Fiscal Fatura de Serviços de Comunicação: "NFSC".
@@ -163,7 +168,8 @@ Classificação de `tipoDocFiscal`:
     ou ANTT: "BOLP-DETRAN".
 13. Boleto ou documento DETRAN que mencione explicitamente IPVA ou ANTT: "BOLP-DETRAN-IPVA-ANTT".
 14. Recibo isolado: "RECIBO".
-15. Se for NFS-e de Goiânia (cuidado para não confundir com nomes parecidos como "Goianira")
+15. Se for NFS-e de Goiânia (cuidado para não confundir com nomes parecidos como "Goianira" ou
+    "Aparecida de Goiânia")
     (determinado pelo município da empresa do prestador de serviços e não deve ser confundido com
     `municipioPrestacao`) e houver indicação explícita de MEI, classificar como "NFS-E",
     não "NFS-EG".

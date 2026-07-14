@@ -17,6 +17,19 @@ def _g(d: dict, *chaves: str, default: Any = "") -> Any:
     return default
 
 
+def _impostos_retidos(ia: dict) -> float:
+    """Soma dos tributos retidos usada para reconstituir o valor bruto (valorMercadoria) a partir
+    do valor liquido (valorTotalDocumento): valorMercadoria = liquido + impostos retidos."""
+    return (
+        fmt.to_float(ia.get("valorISS", "0")) +
+        fmt.to_float(ia.get("valorPIS", "0")) +
+        fmt.to_float(ia.get("valorCOFINS", "0")) +
+        fmt.to_float(ia.get("valorCSLL", "0")) +
+        fmt.to_float(ia.get("totalIRRF", "0")) +
+        fmt.to_float(ia.get("totalINSS", "0"))
+    )
+
+
 def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict, str, str, str]:
     """Aplica a cadeia de refinamento. Retorna (ia_final, cnpj_emit, cnpj_tom, tipo_doc)."""
     ia = dict(ia)
@@ -73,10 +86,15 @@ def montar_item(dado_pedido: dict, ia: dict, num_nota: str, cnpj_emitente: str,
             valor_merc = str(ia.get("valorTotalDocumento", total_nota or "0"))
         elif fmt.to_float(ia.get("valorMercadoria", "0")) > 0:
             valor_merc = str(ia.get("valorMercadoria"))
+        elif fmt.to_float(total_nota) > 0:
+            # Usar o líquido da nota (valorTotalDocumento), que é o que efetivamente vira parcela -
+            # o Mega valida que a soma dos itensReceb bata com a soma das parcelas. O valor bruto
+            # cadastrado no pedido de compra pode não refletir retenções da nota e gerar divergência.
+            valor_merc = str(total_nota)
         elif vtip > 0:
             valor_merc = str(_g(dado_pedido, "VALOR_TOTAL_ITEM_PEDIDO", "VALOR_CONFERIDO", default="0"))
         else:
-            valor_merc = str(total_nota or "0.00")
+            valor_merc = "0.00"
     else:
         valor_merc = str(_g(dado_pedido, "VALOR_TOTAL_ITEM_PEDIDO", default=""))
 
@@ -242,14 +260,7 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     # Para serviços, valorMercadoria = valor líquido + impostos retidos (valor bruto)
     if is_servico:
         total_nota_dec = fmt.to_float(total_nota)
-        impostos_retidos = (
-            fmt.to_float(ia.get("valorPIS", "0")) +
-            fmt.to_float(ia.get("valorCOFINS", "0")) +
-            fmt.to_float(ia.get("valorCSLL", "0")) +
-            fmt.to_float(ia.get("totalIRRF", "0")) +
-            fmt.to_float(ia.get("totalINSS", "0"))
-        )
-        valor_mercadoria = fmt.format_number(total_nota_dec + impostos_retidos)
+        valor_mercadoria = fmt.format_number(total_nota_dec + _impostos_retidos(ia))
     elif is_aluguel:
         valor_mercadoria = str(ia.get("valorMercadoria", "0"))
     else:
