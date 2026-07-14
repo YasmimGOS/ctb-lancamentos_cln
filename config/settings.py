@@ -151,6 +151,7 @@ TIPO_DOC_POR_EMITENTE: dict[str, str] = {"61074175000138": "BOLP"}
 CNPJ_ALUGUEL_IR = "03397056000110"
 CNPJ_VIBRA_ENERGIA = "34274233030605"
 CNPJ_APLICACAO_281 = "04554425000120"
+CNPJ_EQUATORIAL = "00316622501205"
 
 # TEMPORÁRIO: de-para Almoxarifado -> Localização, usado só para AVISO/bloqueio manual hoje
 # (ver services/business_rules.py::resolver_localizacao_almoxarifado e

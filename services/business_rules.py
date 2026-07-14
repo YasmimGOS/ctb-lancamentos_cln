@@ -215,10 +215,13 @@ def calcular_deve_lancar_por_vencimento(cnpj_emitente: str, data_documento_br: s
         return True
     s = (cond_pagto_raw or "").strip().upper()
     dias_txt = s[:-1] if (len(s) > 1 and s[-1] == "D") else ""
-    if not fmt.data_br_para_iso(data_documento_br) or not dias_txt.isdigit():
+    if not dias_txt.isdigit():
         return True
-    venc_iso = fmt.data_br_para_iso(fmt.add_dias_br(data_documento_br, int(dias_txt)))
-    return not fmt.dias_ate(venc_iso, fmt.hoje_iso(tz)) <= 7
+    # Sem data de emissão extraída do documento, usar hoje como referência.
+    data_base_br = data_documento_br if fmt.data_br_para_iso(data_documento_br) else fmt.hoje_br(tz)
+    data_base_iso = fmt.data_br_para_iso(data_base_br)
+    venc_iso = fmt.data_br_para_iso(fmt.add_dias_br(data_base_br, int(dias_txt)))
+    return not fmt.dias_ate(venc_iso, data_base_iso) <= 7
 
 
 def calcular_cond_pagto_por_vencimento(data_documento_br: str, data_vencimento_br: str) -> str:

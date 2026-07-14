@@ -92,7 +92,7 @@ class NotificationService:
         if pedido:
             detalhes["Número do pedido"] = str(pedido)
         if num_nota:
-            detalhes["Nota Fiscal"] = num_nota
+            detalhes["Doc. Fiscal"] = num_nota
         if cod_transacao:
             detalhes["Código Transação"] = cod_transacao
         if pk_mega:

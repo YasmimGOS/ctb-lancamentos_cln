@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from config import CNPJ_ALUGUEL_IR, CNPJ_APLICACAO_281, CNPJ_VIBRA_ENERGIA, TIPOS_DOC_SERVICO
+from config import CNPJ_ALUGUEL_IR, CNPJ_APLICACAO_281, CNPJ_EQUATORIAL, CNPJ_VIBRA_ENERGIA, TIPOS_DOC_SERVICO
 from utils import formatter as fmt
 from utils import validators as val
 from services import business_rules as br
@@ -74,8 +74,11 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     return ia, cnpj_emitente, cnpj_tomador, tipo_doc
 
 
-def montar_item(dado_pedido: dict, ia: dict, num_nota: str, cnpj_emitente: str,
+def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
                 total_nota: str, is_servico: bool, multi_item: bool) -> tuple[dict, float]:
+    """grupo: linhas de dados_pedido com o mesmo ITEM_SEQUENCIA - representam UM item de fato,
+    rateado entre um ou mais centros de custo/projetos (uma linha por rateio)."""
+    dado_pedido = grupo[0]
     is_aluguel = cnpj_emitente == CNPJ_ALUGUEL_IR
     is_vibra = cnpj_emitente == CNPJ_VIBRA_ENERGIA
     vtip = fmt.to_float(_g(dado_pedido, "VALOR_TOTAL_ITEM_PEDIDO", "VALOR_CONFERIDO", default="0"))
@@ -84,6 +87,11 @@ def montar_item(dado_pedido: dict, ia: dict, num_nota: str, cnpj_emitente: str,
         # VIBRA ENERGIA: sempre usar valorTotalDocumento (bruto) da IA
         if is_vibra:
             valor_merc = str(ia.get("valorTotalDocumento", total_nota or "0"))
+        elif is_servico and fmt.to_float(total_nota) > 0:
+            # Serviço: o item precisa bater com a parcela (totalNota/líquido) - o Mega valida que a
+            # soma dos itensReceb bata com a soma das parcelas. O valorMercadoria da IA representa o
+            # bruto e não deve ser usado aqui mesmo quando preenchido, senão diverge da parcela.
+            valor_merc = str(total_nota)
         elif fmt.to_float(ia.get("valorMercadoria", "0")) > 0:
             valor_merc = str(ia.get("valorMercadoria"))
         elif fmt.to_float(total_nota) > 0:
@@ -196,27 +204,30 @@ def montar_item(dado_pedido: dict, ia: dict, num_nota: str, cnpj_emitente: str,
         "codEnquadramentoIPI": "999",
     }
 
-    prct = fmt.to_float(_g(dado_pedido, "PRCT_CC", default="0"))
-    valor_rateio = fmt.format_number(base_dec * prct / 100)
-    prct_fmt = f"{prct:.4f}"
-    item["centrosCusto"] = [{
-        "numNota": str(num_nota),
-        "itemSequencia": str(_g(dado_pedido, "ITEM_SEQUENCIA", default="")),
-        "centroCustoReduzido": str(_g(dado_pedido, "CC_RATEIO", "CC_PADRAO", default="")),
-        "tipoClasse": str(_g(dado_pedido, "TIPO_CLASSE", default="")),
-        "prctRateio": prct_fmt,
-        "valorRateio": valor_rateio,
-        "operacao": "I",
-        "projetos": [{
+    centros_custo = []
+    for dp_rateio in grupo:
+        prct = fmt.to_float(_g(dp_rateio, "PRCT_CC", default="0"))
+        valor_rateio = fmt.format_number(base_dec * prct / 100)
+        prct_fmt = f"{prct:.4f}"
+        centros_custo.append({
             "numNota": str(num_nota),
-            "itemSequencia": str(_g(dado_pedido, "ITEM_SEQUENCIA", default="")),
-            "projetoReduzido": str(_g(dado_pedido, "PROJETO", "PROJ_PADRAO", default="")),
-            "tipoClasse": str(_g(dado_pedido, "TIPO_CLASSE", default="")),
+            "itemSequencia": str(_g(dp_rateio, "ITEM_SEQUENCIA", default="")),
+            "centroCustoReduzido": str(_g(dp_rateio, "CC_RATEIO", "CC_PADRAO", default="")),
+            "tipoClasse": str(_g(dp_rateio, "TIPO_CLASSE", default="")),
             "prctRateio": prct_fmt,
             "valorRateio": valor_rateio,
             "operacao": "I",
-        }],
-    }]
+            "projetos": [{
+                "numNota": str(num_nota),
+                "itemSequencia": str(_g(dp_rateio, "ITEM_SEQUENCIA", default="")),
+                "projetoReduzido": str(_g(dp_rateio, "PROJETO", "PROJ_PADRAO", default="")),
+                "tipoClasse": str(_g(dp_rateio, "TIPO_CLASSE", default="")),
+                "prctRateio": prct_fmt,
+                "valorRateio": valor_rateio,
+                "operacao": "I",
+            }],
+        })
+    item["centrosCusto"] = centros_custo
     item["pedidos"] = [{
         "numNota": str(num_nota),
         "dataDocumento": str(ia.get("dataDocumento", "")),
@@ -232,11 +243,35 @@ def montar_item(dado_pedido: dict, ia: dict, num_nota: str, cnpj_emitente: str,
     return item, base_dec
 
 
+def _agrupar_por_item(dados_pedido: list[dict]) -> list[list[dict]]:
+    """Agrupa as linhas de dados_pedido por ITEM_SEQUENCIA. Cada grupo é UM item de fato; quando
+    o pedido tem o mesmo item rateado entre vários centros de custo/projetos, essas linhas vêm
+    repetidas com o mesmo ITEM_SEQUENCIA (só variando CC_RATEIO/PROJETO/PRCT_CC) e não devem virar
+    itensReceb separados - o Mega rejeita (Constraint PK_EST_ITENSRECEB) por chave duplicada."""
+    grupos: dict[str, list[dict]] = {}
+    ordem: list[str] = []
+    for dp in dados_pedido:
+        chave = str(_g(dp, "ITEM_SEQUENCIA", default=""))
+        if chave not in grupos:
+            grupos[chave] = []
+            ordem.append(chave)
+        grupos[chave].append(dp)
+    return [grupos[chave] for chave in ordem]
+
+
 def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_emitente: str,
                    tipo_doc: str, acao_conta: dict, varacao_fallback: str, tz: str) -> tuple[dict, bool]:
     is_aluguel = cnpj_emitente == CNPJ_ALUGUEL_IR
     is_servico = br.eh_documento_servico(tipo_doc, TIPOS_DOC_SERVICO)
-    multi_item = len(dados_pedido) > 1
+    # Restrito à Equatorial (CNPJ_EQUATORIAL): agrupa linhas de rateio (mesmo ITEM_SEQUENCIA) num
+    # único item, evitando chave duplicada no Mega. Para os demais emitentes mantém o
+    # comportamento anterior (uma linha de dados_pedido = um item), para não alterar
+    # processamentos que já funcionavam.
+    if cnpj_emitente == CNPJ_EQUATORIAL:
+        grupos_item = _agrupar_por_item(dados_pedido)
+    else:
+        grupos_item = [[dp] for dp in dados_pedido]
+    multi_item = len(grupos_item) > 1
 
     # Sanitizar e limpar número da nota
     num_nota_raw = ia.get("numNota", "")
@@ -248,11 +283,11 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     itens: list[dict] = []
     soma = 0.0
     bloqueia_7d = False
-    for dp in dados_pedido:
-        item, base_dec = montar_item(dp, ia, num_nota, cnpj_emitente, total_nota_ia, is_servico, multi_item)
+    for grupo in grupos_item:
+        item, base_dec = montar_item(grupo, ia, num_nota, cnpj_emitente, total_nota_ia, is_servico, multi_item)
         itens.append(item)
         soma += base_dec
-        cond = str(_g(dp, "COND_PAGTO", default="")) or str(pedido_lista.get("COND_ST_CODIGO", ""))
+        cond = str(_g(grupo[0], "COND_PAGTO", default="")) or str(pedido_lista.get("COND_ST_CODIGO", ""))
         bloqueia_7d = bloqueia_7d or br.bloqueia_por_cond_pagto_7dias(cond)
 
     total_nota = total_nota_ia if fmt.to_float(total_nota_ia) > 0 else fmt.format_number(soma)
