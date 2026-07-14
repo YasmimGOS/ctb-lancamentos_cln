@@ -24,7 +24,7 @@ def _impostos_retidos(ia: dict) -> float:
         fmt.to_float(ia.get("valorISS", "0")) +
         fmt.to_float(ia.get("valorPIS", "0")) +
         fmt.to_float(ia.get("valorCOFINS", "0")) +
-        fmt.to_float(ia.get("valorCSLL", "0")) +
+        fmt.to_float(ia.get("totalCSLL", "0")) +
         fmt.to_float(ia.get("totalIRRF", "0")) +
         fmt.to_float(ia.get("totalINSS", "0"))
     )
@@ -87,17 +87,16 @@ def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
         # VIBRA ENERGIA: sempre usar valorTotalDocumento (bruto) da IA
         if is_vibra:
             valor_merc = str(ia.get("valorTotalDocumento", total_nota or "0"))
-        elif is_servico and fmt.to_float(total_nota) > 0:
-            # Serviço: o item precisa bater com a parcela (totalNota/líquido) - o Mega valida que a
-            # soma dos itensReceb bata com a soma das parcelas. O valorMercadoria da IA representa o
-            # bruto e não deve ser usado aqui mesmo quando preenchido, senão diverge da parcela.
-            valor_merc = str(total_nota)
+        elif is_servico and vtip > 0:
+            # Serviço: usar o valor bruto do pedido - mesma base do valorMercadoria da raiz e da
+            # parcela (item x parcela x Total da Fatura precisam bater no Mega). O
+            # valorMercadoria/valorTotalDocumento da IA costuma vir líquido (pós-retenção de ISS,
+            # igual ao valorTotalDocumento) e não deve ser usado aqui, senão o item diverge do
+            # bruto reconstituído na raiz.
+            valor_merc = str(_g(dado_pedido, "VALOR_TOTAL_ITEM_PEDIDO", "VALOR_CONFERIDO", default="0"))
         elif fmt.to_float(ia.get("valorMercadoria", "0")) > 0:
             valor_merc = str(ia.get("valorMercadoria"))
         elif fmt.to_float(total_nota) > 0:
-            # Usar o líquido da nota (valorTotalDocumento), que é o que efetivamente vira parcela -
-            # o Mega valida que a soma dos itensReceb bata com a soma das parcelas. O valor bruto
-            # cadastrado no pedido de compra pode não refletir retenções da nota e gerar divergência.
             valor_merc = str(total_nota)
         elif vtip > 0:
             valor_merc = str(_g(dado_pedido, "VALOR_TOTAL_ITEM_PEDIDO", "VALOR_CONFERIDO", default="0"))
@@ -290,9 +289,13 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
         cond = str(_g(grupo[0], "COND_PAGTO", default="")) or str(pedido_lista.get("COND_ST_CODIGO", ""))
         bloqueia_7d = bloqueia_7d or br.bloqueia_por_cond_pagto_7dias(cond)
 
+    # totalNota = valor líquido (bruto - descontos - retenções); é o que efetivamente compõe o
+    # título/parcela em condições normais.
     total_nota = total_nota_ia if fmt.to_float(total_nota_ia) > 0 else fmt.format_number(soma)
 
-    # Para serviços, valorMercadoria = valor líquido + impostos retidos (valor bruto)
+    # Para serviços, valorMercadoria = valor líquido + impostos retidos (valor bruto = Vl. Total dos
+    # Serviços). O Mega recalcula o líquido internamente (aba "gerar parcelas": parcela - impostos),
+    # então a parcela de serviço precisa ir com o bruto, não o líquido do totalNota.
     if is_servico:
         total_nota_dec = fmt.to_float(total_nota)
         valor_mercadoria = fmt.format_number(total_nota_dec + _impostos_retidos(ia))
@@ -304,6 +307,8 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
         valor_merc_ia = fmt.to_float(ia.get("valorMercadoria", "0"))
         valor_mercadoria = fmt.format_number(valor_merc_ia) if valor_merc_ia > 0 else fmt.format_number(soma)
 
+    valor_parcela = valor_mercadoria if is_servico else total_nota
+
     cond_raw = str(_g(pedido_lista, "COND_ST_CODIGO", default="")) or str(_g(dados_pedido[0] if dados_pedido else {}, "COND_PAGTO", default=""))
     cond_norm = br.normaliza_cond_pagto(cond_raw)
     data_doc = str(ia.get("dataDocumento", ""))
@@ -311,7 +316,7 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
 
     parcela = {
         "numNota": str(num_nota), "numDocumento": str(num_nota), "numParcela": "1",
-        "dataVencimento": venc, "valorParcela": str(total_nota),
+        "dataVencimento": venc, "valorParcela": str(valor_parcela),
     }
 
     tipo_doc_final = br.ajustar_bolp_detran(tipo_doc)
