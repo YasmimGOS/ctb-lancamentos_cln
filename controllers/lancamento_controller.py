@@ -8,6 +8,7 @@ LOGS DETALHADOS: Cada etapa do processamento é logada para facilitar debug.
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -643,6 +644,22 @@ class LancamentoController:
             self.teams.aviso(msg, pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes_nf)
             self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd, erro=erros)
             res.status = "JaCadastrada"
+            log.info("╰─ Status final: %s", res.status)
+            return res
+
+        if status_code == 400 and "Total da Fatura" in erros and "Soma dos Valores das Parcelas" in erros:
+            log.warning(sanitize_emoji("  ⚠️  Valor do pedido de compra não confere com a Nota Fiscal"))
+            msg = "Valor cadastrado no pedido de compra não confere com a Nota Fiscal - requer correção manual do pedido no Mega"
+            match = re.search(r"Parcelas\[([\d.,]+)\].*Fatura\[([\d.,]+)\]", erros)
+            detalhes = {
+                "Nota Fiscal": num_nota,
+                "Valor da Nota Fiscal (bruto)": match.group(1) if match else "",
+                "Valor cadastrado no pedido de compra": match.group(2) if match else "",
+            }
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+            self.bpms.registrar(self.id_disparo, "Falha", num_pedido_bd, erro=erros)
+            res.status = "PedidoValorDivergente"
+            res.mensagem = erros
             log.info("╰─ Status final: %s", res.status)
             return res
 

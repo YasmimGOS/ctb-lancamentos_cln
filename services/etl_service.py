@@ -35,11 +35,17 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     ia = dict(ia)
     ia = br.corrigir_total_iss_por_valor_iss(ia)
 
-    # Consolidar e sanitizar numNota
+    # Consolidar e sanitizar numNota: usar a leitura mais completa entre primária e extra (a IA
+    # truncar dígitos de um numNota composto, ex. "1/77" -> "1", é mais provável do que ela inventar
+    # dígitos a mais - por isso comparamos pelo tamanho já sanitizado, não só se a primária veio vazia).
     num_nota_primaria = str(ia.get("numNota", "")).strip()
     num_nota_extra = str(extra.get("numNota", "")).strip()
-    num_nota_final = num_nota_primaria if num_nota_primaria else num_nota_extra
-    ia["numNota"] = br.sanitiza_num_nota(num_nota_final)
+    sanit_primaria = br.sanitiza_num_nota(num_nota_primaria)
+    sanit_extra = br.sanitiza_num_nota(num_nota_extra)
+    if len(sanit_extra) > len(sanit_primaria):
+        ia["numNota"] = sanit_extra
+    else:
+        ia["numNota"] = sanit_primaria
 
     # Consolidar chave de acesso: priorizar extração extra se tiver 44 dígitos
     chave_primaria = str(ia.get("chaveAcesso", "")).strip()
@@ -83,16 +89,15 @@ def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
     is_vibra = cnpj_emitente == CNPJ_VIBRA_ENERGIA
     vtip = fmt.to_float(_g(dado_pedido, "VALOR_TOTAL_ITEM_PEDIDO", "VALOR_CONFERIDO", default="0"))
 
+    # O Mega valida o item do recebimento contra o valor original do pedido de compra ("Origem" x
+    # "Recebimento" no Valor Unitário) - não é possível substituir pelo bruto reconstruído da NF
+    # quando ele diverge do pedido; a parcela é que se ajusta para bater com os itens (ver
+    # montar_payload), nunca o contrário.
     if not multi_item:
-        # VIBRA ENERGIA: sempre usar valorTotalDocumento (bruto) da IA
         if is_vibra:
+            # VIBRA ENERGIA: sempre usar valorTotalDocumento (bruto) da IA
             valor_merc = str(ia.get("valorTotalDocumento", total_nota or "0"))
         elif is_servico and vtip > 0:
-            # Serviço: usar o valor bruto do pedido - mesma base do valorMercadoria da raiz e da
-            # parcela (item x parcela x Total da Fatura precisam bater no Mega). O
-            # valorMercadoria/valorTotalDocumento da IA costuma vir líquido (pós-retenção de ISS,
-            # igual ao valorTotalDocumento) e não deve ser usado aqui, senão o item diverge do
-            # bruto reconstituído na raiz.
             valor_merc = str(_g(dado_pedido, "VALOR_TOTAL_ITEM_PEDIDO", "VALOR_CONFERIDO", default="0"))
         elif fmt.to_float(ia.get("valorMercadoria", "0")) > 0:
             valor_merc = str(ia.get("valorMercadoria"))
@@ -307,6 +312,10 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
         valor_merc_ia = fmt.to_float(ia.get("valorMercadoria", "0"))
         valor_mercadoria = fmt.format_number(valor_merc_ia) if valor_merc_ia > 0 else fmt.format_number(soma)
 
+    # valorParcela = valorMercadoria (bruto) para serviço. Quando o pedido de compra estiver
+    # cadastrado com o líquido em vez do bruto, o Mega rejeita (Soma das Parcelas x Total da
+    # Fatura) - isso é intencional: sinaliza que o VALOR_TOTAL_ITEM_PEDIDO do pedido precisa ser
+    # corrigido, em vez de registrar silenciosamente um valor que não bate com a nota fiscal.
     valor_parcela = valor_mercadoria if is_servico else total_nota
 
     cond_raw = str(_g(pedido_lista, "COND_ST_CODIGO", default="")) or str(_g(dados_pedido[0] if dados_pedido else {}, "COND_PAGTO", default=""))
