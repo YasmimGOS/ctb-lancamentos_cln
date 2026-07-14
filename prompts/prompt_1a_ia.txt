@@ -231,11 +231,18 @@ Regra de data do documento (dataDocumento):
 4. Se houver "Data do Documento" e "Data de Processamento", priorizar "Data do Documento".
 5. Para NF-e, NFS-e, NFC-e, CT-e e demais notas fiscais, usar a data de emissão da nota.
 6. Para NFS-e e NFS-EG especificamente, se houver o rótulo "Data de Competência" (ou "Competência")
-   no documento, usar esse valor como `dataDocumento` - é comum esse rótulo estar mais legível ou
-   mais confiável do que "Data de Emissão" no layout de NFS-e. Ler o ano com atenção redobrada
-   (dígito a dígito): erros de OCR trocando o último dígito do ano (ex.: "2026" lido como "2025")
-   são comuns e graves, pois geram datas de vencimento incoerentes no fluxo posterior.
-7. Conferência de plausibilidade do ano: se a data de emissão/competência extraída resultar em um
+   no documento E esse valor tiver dia, mês e ano completos (dd/MM/yyyy), usar esse valor como
+   `dataDocumento` - é comum esse rótulo estar mais legível ou mais confiável do que "Data de
+   Emissão" no layout de NFS-e. Ler o ano com atenção redobrada (dígito a dígito): erros de OCR
+   trocando o último dígito do ano (ex.: "2026" lido como "2025") são comuns e graves, pois geram
+   datas de vencimento incoerentes no fluxo posterior.
+7. Se "Data de Competência" vier incompleta (só mês/ano, ex.: "07/2026", sem o dia - comum quando o
+   rótulo indica apenas o mês de referência contábil), NUNCA usar esse valor incompleto como
+   `dataDocumento`. Nesse caso, usar a "Data e Hora de Emissão" (ou "Data de Emissão") do próprio
+   documento, que traz o dia completo.
+8. `dataDocumento` deve SEMPRE ser retornado no formato completo dd/MM/yyyy, com dia, mês e ano.
+   Nunca retornar apenas mês/ano (ex.: "07/2026") nem apenas o ano.
+9. Conferência de plausibilidade do ano: se a data de emissão/competência extraída resultar em um
    ano muito diferente do que seria esperado para um documento recente (e não houver nenhuma
    indicação explícita no arquivo de que a nota é antiga), revisar a leitura do ano antes de
    finalizar - é mais provável um erro de leitura de 1 dígito do que a nota ser de um ano anterior.

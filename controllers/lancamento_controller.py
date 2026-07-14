@@ -509,8 +509,26 @@ class LancamentoController:
             return res
         log.info(sanitize_emoji("  │  ✓ CNPJ tomador válido"))
 
+        # Validação: Data do Documento válida (dd/MM/yyyy completo)
+        log.info("  ├─ Validação 5: Data do Documento válida...")
+        if not fmt.data_br_para_iso(contexto["data_documento"]):
+            log.warning(sanitize_emoji("  │  ⚠️  Data do documento inválida ou incompleta - bloqueio ativado"))
+            msg = "Data do documento não pôde ser identificada corretamente no anexo - requer conferência manual"
+            detalhes = {
+                "Data do documento extraída": contexto["data_documento"] or "(vazia)",
+                "Nota Fiscal": payload.get("numNota", ""),
+            }
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                erro=f"Motivo: Data do documento invalida ou incompleta ({contexto['data_documento']})")
+            res.deve_lancar = False
+            res.status = "DataDocumentoInvalida"
+            log.info("  └─ Status final: %s (registrado no BD)", res.status)
+            return res
+        log.info(sanitize_emoji("  │  ✓ Data do documento válida"))
+
         # Validação: Condição de Pagamento ≤ 7 dias
-        log.info("  ├─ Validação 5: Condição de Pagamento ≤ 7 dias...")
+        log.info("  ├─ Validação 6: Condição de Pagamento ≤ 7 dias...")
         log.info("  │  ├─ Data Documento: %s", contexto["data_documento"])
         log.info("  │  ├─ Cond. Pagamento: %s", contexto["cond_pagto"])
         log.info("  │  └─ Bloqueio 7d (item): %s", contexto["bloqueia_7d"])
@@ -533,7 +551,7 @@ class LancamentoController:
         log.info(sanitize_emoji("  │  ✓ Condição de pagamento válida (> 7 dias)"))
 
         # Validação: Condição de Pagamento x Vencimento do Boleto
-        log.info("  ├─ Validação 6: Condição de Pagamento x Vencimento do Boleto...")
+        log.info("  ├─ Validação 7: Condição de Pagamento x Vencimento do Boleto...")
         cond_ok, cond_esperada = br.valida_cond_pagto_por_vencimento(
             contexto["cond_pagto"], contexto["data_documento"], data_vencimento_boleto)
         if not cond_ok:
@@ -556,7 +574,7 @@ class LancamentoController:
         log.info(sanitize_emoji("  │  ✓ Condição de pagamento confere (ou sem boleto/código especial para comparar)"))
 
         # Validação: Parcelas por Boleto (pagamento rateado em múltiplos boletos)
-        log.info("  ├─ Validação 7: Parcelas por Boleto...")
+        log.info("  ├─ Validação 8: Parcelas por Boleto...")
         parcelas_boleto, soma_ok, soma_calculada = br.montar_parcelas_por_boletos(
             payload.get("numNota", ""), boletos or [], payload.get("totalNota", "0"))
         if parcelas_boleto and not soma_ok:
