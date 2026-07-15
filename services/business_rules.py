@@ -347,3 +347,9 @@ def resolver_chave_acesso(tipo_doc: str, chave_atual: str) -> str:
 
 def eh_reembolso(agn_st_fantasia: str) -> bool:
     return "REEMBOLSO" in (agn_st_fantasia or "").strip().upper()
+
+
+def eh_fatura_execucao_manual(agn_st_fantasia: str, fantasias_manuais: set[str]) -> bool:
+    """Fornecedores cuja fatura de serviço foge do padrão de documento previsto para o RPA (ex.:
+    Sitpass) - nunca deve ir para execução automática, sempre lançamento manual."""
+    return (agn_st_fantasia or "").strip().upper() in {f.upper() for f in fantasias_manuais}

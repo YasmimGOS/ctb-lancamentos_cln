@@ -12,7 +12,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from config import CNPJ_VIBRA_ENERGIA, get_settings
+from config import CNPJ_VIBRA_ENERGIA, FANTASIAS_EXECUCAO_MANUAL, get_settings
 from models import ResultadoPedido
 from services import business_rules as br
 from services import etl_service as etl
@@ -115,6 +115,22 @@ class LancamentoController:
             log.info(sanitize_emoji("  ✓ Pedido não encontrado no BD. Prosseguindo com processamento."))
         except Exception as exc:  # noqa: BLE001
             log.exception(sanitize_emoji("  ⚠️  Erro ao consultar BD para pedido %s: %s. Prosseguindo mesmo assim."), num_pedido_bd, exc)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # VERIFICAÇÃO PRÉVIA: Fornecedor com fatura fora do padrão (execução manual)
+        # ═══════════════════════════════════════════════════════════════════
+        log.info(sanitize_emoji("[VERIFICAÇÃO PRÉVIA] 🔍 Verificando se fornecedor exige execução manual..."))
+        if br.eh_fatura_execucao_manual(fantasia, FANTASIAS_EXECUCAO_MANUAL):
+            log.warning(sanitize_emoji("  ⚠️  Fornecedor %s foge do padrão de documento do RPA - bloqueio ativado"), fantasia)
+            msg = "Fatura de serviço desse fornecedor foge do padrão de documento previsto para o RPA - requer lançamento manual"
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra={"Fornecedor": fantasia})
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                erro=f"Motivo: Fornecedor {fantasia} foge do padrao de documento do RPA - lancamento manual")
+            res.deve_lancar = False
+            res.status = "ExecucaoManual"
+            log.info("  └─ Status final: %s (registrado no BD)", res.status)
+            return [res]
+        log.info(sanitize_emoji("  ✓ Fornecedor dentro do padrão"))
 
         # ═══════════════════════════════════════════════════════════════════
         # ETAPA 1: Verificar REEMBOLSO

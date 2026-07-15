@@ -468,6 +468,17 @@ Valor total do documento e Valores de Mercadoria/Bases:
    - Se houver rótulo explícito de valor líquido, usar exatamente esse valor:
      "Valor Total Líquido", "Valor Líquido da Nota", "Valor Líquido a Receber",
      "Valor Total da Nota Fiscal - IBS/CBS" (quando representar o líquido, não o bruto).
+   - ARMADILHA da tabela informativa de IBS/CBS (reforma tributária): notas NFS-e mais recentes
+     trazem uma tabela adicional "IBS/CBS" (ou "Informações do IBS e da CBS") com um campo do tipo
+     "Valor dos serviços antes dos tributos", "Valor da operação antes dos tributos" ou similar.
+     Esse valor costuma ser um cálculo aproximado feito pelo próprio emissor (ex.: bruto menos uma
+     estimativa de ISS) só para fins do novo sistema IBS/CBS, e NÃO é nem o bruto nem o líquido
+     real do documento. NUNCA usar esse valor como `valorTotalDocumento` nem como
+     `valorMercadoria`. O bruto continua sendo "Vl. do Serviço"/"Valor Total do Serviço"/"Valor
+     Total Cobrado" (normalmente no topo ou rodapé da primeira/última página, fora da tabela
+     IBS/CBS); o líquido continua sendo calculado a partir das retenções explícitas de
+     ISS/PIS/COFINS/IRRF/CSLL destacadas no corpo da nota (regra abaixo), nunca da aproximação
+     mostrada na tabela IBS/CBS.
    - Se não houver rótulo explícito de valor líquido, calcular:
      `valorTotalDocumento` = "Vl. do Serviço"/"Valor Total dos Serviços" (bruto) menos a soma de
      todas as retenções explícitas (ISS retido + PIS + COFINS + CSLL + IRRF + INSS) e descontos.

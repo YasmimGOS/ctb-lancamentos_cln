@@ -164,3 +164,8 @@ ALMOXARIFADO_LOCALIZACAO: dict[str, str] = {
 }
 COND_PAGTO_A_VISTA = {"ADIANT", "TESOURARIA", "A VISTA", "AVISTA", "CREDITO"}
 TIPOS_DOC_SERVICO = {"NFS-EG", "NFS-E", "NFF", "NFSTE", "NFSC"}
+
+# Fornecedores cuja fatura de serviço foge do padrão de documento previsto para o RPA (ex.: Sitpass,
+# fatura da CIA METROPOLITANA DE TRANSPORTE COLETIVO) - bloqueia ANTES de qualquer processamento,
+# nunca deve ir para execução automática; sempre lançamento manual.
+FANTASIAS_EXECUCAO_MANUAL = {"CIA METROPOLITANA DE TRANSPORTE COLETIVO"}

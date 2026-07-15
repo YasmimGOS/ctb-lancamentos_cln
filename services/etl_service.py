@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from config import CNPJ_ALUGUEL_IR, CNPJ_APLICACAO_281, CNPJ_EQUATORIAL, CNPJ_VIBRA_ENERGIA, TIPOS_DOC_SERVICO
+from config import CNPJ_ALUGUEL_IR, CNPJ_APLICACAO_281, CNPJ_VIBRA_ENERGIA, TIPOS_DOC_SERVICO
 from utils import formatter as fmt
 from utils import validators as val
 from services import business_rules as br
@@ -267,14 +267,12 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
                    tipo_doc: str, acao_conta: dict, varacao_fallback: str, tz: str) -> tuple[dict, bool]:
     is_aluguel = cnpj_emitente == CNPJ_ALUGUEL_IR
     is_servico = br.eh_documento_servico(tipo_doc, TIPOS_DOC_SERVICO)
-    # Restrito à Equatorial (CNPJ_EQUATORIAL): agrupa linhas de rateio (mesmo ITEM_SEQUENCIA) num
-    # único item, evitando chave duplicada no Mega. Para os demais emitentes mantém o
-    # comportamento anterior (uma linha de dados_pedido = um item), para não alterar
-    # processamentos que já funcionavam.
-    if cnpj_emitente == CNPJ_EQUATORIAL:
-        grupos_item = _agrupar_por_item(dados_pedido)
-    else:
-        grupos_item = [[dp] for dp in dados_pedido]
+    # Agrupa linhas de rateio (mesmo ITEM_SEQUENCIA) num único item - qualquer pedido rateado entre
+    # vários centros de custo/projetos vem com uma linha de dados_pedido por rateio, e virar um
+    # itensReceb por linha gera chave duplicada no Mega (Constraint PK_EST_ITENSRECEB). Não é
+    # específico da Equatorial: pedido 320588 (fornecedor Arquivolff, 9 rateios do mesmo item)
+    # reproduziu o mesmo erro.
+    grupos_item = _agrupar_por_item(dados_pedido)
     multi_item = len(grupos_item) > 1
 
     # Sanitizar e limpar número da nota
