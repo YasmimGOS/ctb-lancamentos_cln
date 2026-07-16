@@ -61,6 +61,13 @@ def test_valida_tomador_por_nome():
     assert br.valida_tomador_x_filial("", "PONTAL ADMINISTRACAO", "15537", "") is True
 
 
+def test_valida_tomador_ccp_cerrado_filial_235758():
+    assert br.valida_tomador_x_filial(
+        "13619137000251", "CCP CERRADO EMPREENDIMENTOS IMOBILIARIOS S.A.", "235758", "24357174000174"
+    ) is True
+    assert br.valida_tomador_x_filial("13619137000251", "CCP CERRADO", "3", "01657436000110") is False
+
+
 def test_remove_zeros_a_esquerda():
     assert br.remove_zeros_a_esquerda("000002331") == "2331"
     assert br.remove_zeros_a_esquerda("0") == "0"
@@ -83,3 +90,27 @@ def test_retificar_iss_nao_retido():
     assert br.precisa_retificar_iss_nao_retido(ia, extra) is True
     ret = br.retificar_iss_nao_retido(ia)
     assert ret["valorISS"] == "0.00" and ret["totalISS"] == "0.00"
+
+
+def test_pis_cofins_reconhecido_na_raiz():
+    assert br.eh_pis_cofins_reconhecido({"valorPIS": "10.00", "valorCOFINS": "0.00"}) is True
+    assert br.eh_pis_cofins_reconhecido({"valorPIS": "0.00", "valorCOFINS": "5.50"}) is True
+    assert br.eh_pis_cofins_reconhecido({"valorPIS": "0.00", "valorCOFINS": "0.00"}) is False
+
+
+def test_resolver_cnpj_emitente_corrigido():
+    de_para = {"CCP CERRADO EMPREENDIMENTOS IMOBILIARIOS S.A": "01543032000104"}
+    assert br.resolver_cnpj_emitente_corrigido(
+        "CCP Cerrado Empreendimentos Imobiliarios S.A", "340577401231", de_para
+    ) == "01543032000104"
+    assert br.resolver_cnpj_emitente_corrigido("Outro Fornecedor", "12345678000199", de_para) == "12345678000199"
+
+
+def test_pis_cofins_reconhecido_no_item():
+    payload = {"valorPIS": "0.00", "valorCOFINS": "0.00",
+               "itensReceb": [{"valorPIS": "0.00", "valorCofins": "3.20"}]}
+    assert br.eh_pis_cofins_reconhecido(payload) is True
+
+    payload_sem = {"valorPIS": "0.00", "valorCOFINS": "0.00",
+                   "itensReceb": [{"valorPIS": "0.00", "valorCofins": "0.00"}]}
+    assert br.eh_pis_cofins_reconhecido(payload_sem) is False

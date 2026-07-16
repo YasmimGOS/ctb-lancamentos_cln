@@ -107,6 +107,23 @@ O fluxo segue este pipeline obrigatorio:
 - `valorMercadoria = Aluguel + Encargos`
 - IR impresso (logica especifica)
 
+### 2.6bis CNPJ do Emitente Corrigido por Fornecedor Conhecido
+
+Alguns fornecedores fazem a IA errar a leitura do CNPJ do emitente com frequencia (ex.:
+administradoras que emitem boleto de rateio de energia citando a concessionaria no documento -
+a IA confunde emitente com tomador, ou le um CNPJ incompleto). Para esses casos conhecidos, o
+CNPJ correto e forcado via de-para fixo, usando o fornecedor **cadastrado no pedido**
+(`AGN_ST_FANTASIA`) como chave - nao o nome lido pela IA.
+
+- **Config:** `config/settings.py::CNPJ_CORRETO_POR_FANTASIA`
+- **Regra:** `services/business_rules.py::resolver_cnpj_emitente_corrigido`
+- **Aplicado em:** `controllers/lancamento_controller.py::processar_pedido`, logo apos
+  `etl.consolidar_resposta_ia`, antes de montar o payload e das validacoes de CNPJ
+- **Casos cadastrados:**
+  - `CCP CERRADO EMPREENDIMENTOS IMOBILIARIOS S.A` -> CNPJ `01543032000104` (adicionado em
+    16/07/2026 - IA leu `340577401231`, incompleto, e o nome "EQUATORIAL GOIAS..." apareceu como
+    emitente por citar a concessionaria no boleto de rateio)
+
 ### 2.6 ISS (Imposto sobre Servicos)
 
 **Precedencia de retencao:**
@@ -165,6 +182,33 @@ O fluxo segue este pipeline obrigatorio:
 - **Acao:** NAO lancar + notificar Teams + registrar BD
 - **Mensagem:** "Pedido {pdc}: condicao de pagamento <= 7 dias. Lancamento bloqueado."
 
+### 3.6 PIS/COFINS reconhecidos - PALIATIVO PROVISORIO (ATIVO)
+
+> **ATENCAO:** esta e uma regra **temporaria/paliativa**, nao uma regra de negocio definitiva.
+> Criada em 16/07/2026 porque ainda nao ha controle confiavel do lancamento correto de
+> PIS/COFINS. Enquanto a TI nao resolve, o robo bloqueia ANTES de lancar em vez de lancar
+> errado e precisar excluir o lancamento no Mega depois (excluir era o problema que motivou
+> este paliativo).
+
+- **Trigger:** payload com `valorPIS` ou `valorCOFINS` reconhecido (> 0) na raiz OU em algum
+  item de `itensReceb` (`valorPIS`/`valorCofins`).
+- **Acao:** NAO lancar + notificar Teams + registrar BD com status **"Provisorio"** (para nao
+  reprocessar o pedido nas proximas execucoes).
+- **Mensagem Teams:** pedido possui PIS/COFINS reconhecido, ha problema tecnico ainda em
+  resolucao no lancamento desses tributos, pedido sera lancado manualmente. Acao PROVISORIA
+  ate ajuste da TI.
+- **Onde esta implementado:**
+  - `services/business_rules.py::eh_pis_cofins_reconhecido` (regra pura)
+  - `controllers/lancamento_controller.py::_validar_e_lancar_payload` - "Validação 9: PIS/COFINS
+    reconhecidos" (bloqueio + notificacao + registro BD)
+- **COMO REMOVER quando a TI resolver o lancamento de PIS/COFINS:**
+  1. Apagar a função `eh_pis_cofins_reconhecido` em `services/business_rules.py`.
+  2. Apagar o bloco "Validação 9" em `_validar_e_lancar_payload`
+     (`controllers/lancamento_controller.py`).
+  3. Apagar a nota "PALIATIVO PROVISÓRIO ATIVO" no docstring do topo de
+     `lancamento_controller.py`.
+  4. Apagar esta seção 3.6 (ou marcar como resolvida no changelog abaixo).
+
 ---
 
 ## 4. Integracao IA (Claude)
@@ -217,6 +261,8 @@ O fluxo segue este pipeline obrigatorio:
 "15537": PONTAL (07258201000132)
 "150103": RAPIDO ARAGUAIA (01657436000625)
 "221461": MOTO FOR (02862548000176)
+"235758": CCP CERRADO (13619137000251) - Condominio Shopping Center Cerrado; faturas da
+  Equatorial chegam endereçadas a administradora (CCP Cerrado), nao ao condominio
 ```
 
 ---
@@ -258,6 +304,23 @@ O fluxo segue este pipeline obrigatorio:
 ---
 
 ## 9. Changelog
+
+### v1.5 (16/07/2026) - CNPJ do tomador CCP Cerrado (filial 235758) no DEPARA_FILIAIS
+- Adicionada filial `235758` (Condominio Shopping Center Cerrado) ao `DEPARA_FILIAIS`
+  (config/settings.py), apontando para o CNPJ `13619137000251` (CCP Cerrado Empreendimentos
+  Imobiliarios S.A.) - faturas da Equatorial para essa filial chegam endereçadas a administradora
+  do shopping, nao ao condominio cadastrado. Confirmado com a usuaria em 16/07/2026.
+
+### v1.5 (16/07/2026) - CNPJ do emitente corrigido por fornecedor conhecido (ver 2.6bis)
+- Novo de-para `CNPJ_CORRETO_POR_FANTASIA` (config/settings.py) para forcar o CNPJ correto do
+  emitente quando o fornecedor cadastrado no pedido e um caso conhecido de erro de leitura da IA.
+- Primeiro caso: CCP Cerrado Empreendimentos Imobiliarios S.A -> `01543032000104`.
+
+### v1.5 (16/07/2026) - PALIATIVO PROVISORIO (ver 3.6)
+- Bloqueio provisorio de lancamento quando ha PIS/COFINS reconhecidos no documento
+  (ver secao 3.6) - registra status "Provisorio" no BD e avisa Teams para lancamento manual.
+- **NAO E DEFINITIVO:** criado por falta de controle confiavel do lancamento de PIS/COFINS.
+  Remover assim que a TI resolver (instrucoes de remocao na secao 3.6).
 
 ### v1.4 (10/07/2026)
 - Reescrita Python (arquitetura em camadas)

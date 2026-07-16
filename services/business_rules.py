@@ -353,3 +353,34 @@ def eh_fatura_execucao_manual(agn_st_fantasia: str, fantasias_manuais: set[str])
     """Fornecedores cuja fatura de serviço foge do padrão de documento previsto para o RPA (ex.:
     Sitpass) - nunca deve ir para execução automática, sempre lançamento manual."""
     return (agn_st_fantasia or "").strip().upper() in {f.upper() for f in fantasias_manuais}
+
+
+def resolver_cnpj_emitente_corrigido(agn_st_fantasia: str, cnpj_emitente_ia: str, de_para: dict[str, str]) -> str:
+    """Corrige o CNPJ do emitente lido pela IA para fornecedores que ela erra com frequência (ex.:
+    administradoras que emitem boleto de rateio de energia citando a concessionária no documento -
+    a IA acaba confundindo emitente com tomador ou lendo um CNPJ incompleto).
+
+    Usa o fornecedor cadastrado no PEDIDO (AGN_ST_FANTASIA), não o nome lido pela IA, porque é a
+    fonte confiável. Retorna o CNPJ correto cadastrado em `de_para` quando o fornecedor está lá,
+    senão devolve `cnpj_emitente_ia` sem alteração."""
+    de_para_upper = {f.strip().upper(): cnpj for f, cnpj in de_para.items()}
+    correto = de_para_upper.get((agn_st_fantasia or "").strip().upper())
+    return val.normaliza_cnpj(correto) if correto else cnpj_emitente_ia
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# >>> PALIATIVO PROVISÓRIO - PIS/COFINS (ver controllers/lancamento_controller.py) <<<
+# Motivo: sem controle confiável do lançamento correto de PIS/COFINS hoje. Enquanto a TI não
+# resolve, bloqueamos ANTES de lançar (em vez de lançar errado e precisar excluir depois).
+# REMOVER esta função e a chamada correspondente no controller assim que a TI resolver.
+# ══════════════════════════════════════════════════════════════════════════════
+def eh_pis_cofins_reconhecido(payload: dict) -> bool:
+    """TEMPORÁRIO/PALIATIVO: True se o payload tem valor de PIS ou COFINS reconhecido (raiz ou em
+    algum item de itensReceb). Usado para bloquear o lançamento automático enquanto não há solução
+    técnica confiável para lançar esses tributos corretamente."""
+    if fmt.to_float(payload.get("valorPIS", "0")) > 0 or fmt.to_float(payload.get("valorCOFINS", "0")) > 0:
+        return True
+    for item in payload.get("itensReceb", []) or []:
+        if fmt.to_float(item.get("valorPIS", "0")) > 0 or fmt.to_float(item.get("valorCofins", "0")) > 0:
+            return True
+    return False

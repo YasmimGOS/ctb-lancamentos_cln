@@ -128,6 +128,10 @@ DEPARA_FILIAIS: dict[str, dict[str, str]] = {
     "15537": {"nome": "PONTAL", "cnpj": "07258201000132"},
     "150103": {"nome": "RAPIDO ARAGUAIA", "cnpj": "01657436000625"},
     "221461": {"nome": "MOTO FOR", "cnpj": "02862548000176"},
+    # Filial 235758 = Condomínio Shopping Center Cerrado. Faturas da Equatorial chegam endereçadas
+    # à administradora do shopping (CCP Cerrado Empreendimentos Imobiliários S.A.), não ao
+    # condomínio - confirmado em 16/07/2026 (pedidos 5795/5796).
+    "235758": {"nome": "CCP CERRADO", "cnpj": "13619137000251"},
 }
 
 TABELA_DEPARA_TIPODOC: dict[str, dict[str, object]] = {
@@ -169,3 +173,12 @@ TIPOS_DOC_SERVICO = {"NFS-EG", "NFS-E", "NFF", "NFSTE", "NFSC"}
 # fatura da CIA METROPOLITANA DE TRANSPORTE COLETIVO) - bloqueia ANTES de qualquer processamento,
 # nunca deve ir para execução automática; sempre lançamento manual.
 FANTASIAS_EXECUCAO_MANUAL = {"CIA METROPOLITANA DE TRANSPORTE COLETIVO"}
+
+# De-para fantasia (AGN_ST_FANTASIA do pedido) -> CNPJ correto do emitente, usado para corrigir a
+# leitura da IA em fornecedores que ela erra com frequência (ex.: administradoras que emitem
+# boleto de rateio de energia citando a concessionária no documento - a IA acaba confundindo
+# emitente com tomador ou lendo um CNPJ incompleto/errado). Ver
+# services/business_rules.py::resolver_cnpj_emitente_corrigido.
+CNPJ_CORRETO_POR_FANTASIA: dict[str, str] = {
+    "CCP CERRADO EMPREENDIMENTOS IMOBILIARIOS S.A": "01543032000104",
+}

@@ -4,6 +4,12 @@ Espelha a arvore do Power Automate, com bloqueios ANTES do lancamento
 (reembolso, APOLICE, CNPJ, 7 dias) - mais robusto que tratar no erro 400.
 
 LOGS DETALHADOS: Cada etapa do processamento é logada para facilitar debug.
+
+PALIATIVO PROVISÓRIO ATIVO (ver "Validação 9: PIS/COFINS reconhecidos" em
+_validar_e_lancar_payload): pedidos com PIS/COFINS reconhecidos NÃO são lançados - vão para
+lançamento manual e ficam registrados no BD com status "Provisorio" para não reprocessar.
+Isso existe só porque ainda não há solução técnica confiável para lançar PIS/COFINS corretamente.
+Quando a TI resolver, remover esse bloco e services/business_rules.py::eh_pis_cofins_reconhecido.
 """
 from __future__ import annotations
 
@@ -12,7 +18,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from config import CNPJ_VIBRA_ENERGIA, FANTASIAS_EXECUCAO_MANUAL, get_settings
+from config import CNPJ_CORRETO_POR_FANTASIA, CNPJ_VIBRA_ENERGIA, FANTASIAS_EXECUCAO_MANUAL, get_settings
 from models import ResultadoPedido
 from services import business_rules as br
 from services import etl_service as etl
@@ -255,6 +261,15 @@ class LancamentoController:
             # Consolidar resposta IA
             log.info(sanitize_emoji("  ├─ 🔄 Consolidando respostas IA..."))
             ia_final, cnpj_emit, cnpj_tom, tipo_doc = etl.consolidar_resposta_ia(ia_raw, extra_raw, pdc)
+
+            # Corrigir CNPJ do emitente para fornecedores que a IA erra com frequência (de-para
+            # fixo em config/settings.py::CNPJ_CORRETO_POR_FANTASIA)
+            cnpj_emit_corrigido = br.resolver_cnpj_emitente_corrigido(fantasia, cnpj_emit, CNPJ_CORRETO_POR_FANTASIA)
+            if cnpj_emit_corrigido != cnpj_emit:
+                log.info(sanitize_emoji("  │  ℹ️  CNPJ emitente corrigido via de-para (fornecedor %s): %s -> %s"),
+                         fantasia, cnpj_emit, cnpj_emit_corrigido)
+                cnpj_emit = cnpj_emit_corrigido
+                ia_final["cnpjEmitente"] = cnpj_emit
             log.info(sanitize_emoji("  │  ✓ Consolidação concluída"))
             log.info("  │  ├─ Tipo Doc Final: %s", tipo_doc)
             log.info("  │  ├─ CNPJ Emitente: %s", cnpj_emit)
@@ -614,6 +629,39 @@ class LancamentoController:
             log.info(sanitize_emoji("  │  ✓ %d parcela(s) montada(s) a partir dos boletos anexados"), len(parcelas_boleto))
         else:
             log.info(sanitize_emoji("  │  ✓ Parcela única (0 ou 1 boleto anexado)"))
+
+        # ═══════════════════════════════════════════════════════════════════
+        # Validação 9: PIS/COFINS reconhecidos
+        # ═══════════════════════════════════════════════════════════════════
+        # ┌──────────────────────────────────────────────────────────────────────────────────┐
+        # │ >>> PALIATIVO PROVISÓRIO - NÃO É REGRA DE NEGÓCIO DEFINITIVA <<<                  │
+        # │ Motivo: ainda não há controle confiável do lançamento correto de PIS/COFINS.      │
+        # │ Enquanto a TI não resolver, preferimos NÃO lançar (força lançamento manual do      │
+        # │ pedido) a lançar com PIS/COFINS errado e precisar excluir o lançamento no Mega.    │
+        # │ REMOVER assim que a TI resolver: apagar este bloco e                               │
+        # │ services/business_rules.py::eh_pis_cofins_reconhecido.                            │
+        # └──────────────────────────────────────────────────────────────────────────────────┘
+        log.info("  ├─ Validação 9: PIS/COFINS reconhecidos no documento (bloqueio PROVISÓRIO)...")
+        if br.eh_pis_cofins_reconhecido(payload):
+            log.warning(sanitize_emoji("  │  ⚠️  PIS/COFINS reconhecidos no documento - bloqueio PROVISÓRIO (paliativo) ativado"))
+            msg = ("Documento possui valores de PIS/COFINS reconhecidos. Por problema técnico "
+                   "ainda em resolução no lançamento desses tributos, este pedido não será lançado "
+                   "automaticamente e requer lançamento manual. Ação PROVISÓRIA até ajuste da TI")
+            detalhes = {
+                "Nota Fiscal": payload.get("numNota", ""),
+                "valorPIS": payload.get("valorPIS", "0.00"),
+                "valorCOFINS": payload.get("valorCOFINS", "0.00"),
+            }
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes)
+            self.bpms.registrar(self.id_disparo, "Provisorio", num_pedido_bd,
+                                erro=f"Motivo: PIS/COFINS reconhecidos (valorPIS={payload.get('valorPIS', '0.00')}, "
+                                     f"valorCOFINS={payload.get('valorCOFINS', '0.00')}) - bloqueio PROVISORIO "
+                                     f"(paliativo), lancamento manual ate ajuste da TI")
+            res.deve_lancar = False
+            res.status = "ProvisorioPisCofins"
+            log.info("  └─ Status final: %s (registrado no BD como Provisorio)", res.status)
+            return res
+        log.info(sanitize_emoji("  │  ✓ Sem PIS/COFINS reconhecidos"))
         log.info("  └─ Todas as validações passaram")
 
         # ═══════════════════════════════════════════════════════════════════
@@ -677,6 +725,32 @@ class LancamentoController:
             res.status = "PedidoValorDivergente"
             res.mensagem = erros
             log.info("╰─ Status final: %s", res.status)
+            return res
+
+        # Mega valida o item do recebimento (valorMercadoria) contra o "Valor Unitário" registrado
+        # no pedido de compra - quando o pedido de compra foi cadastrado com um valor diferente do
+        # total da fatura (ex.: só a base de ICMS, em vez da soma de todos os itens da fatura), o
+        # lançamento é rejeitado. Isso é um problema de cadastro do PEDIDO DE COMPRA no Mega, não
+        # do valor calculado pelo RPA - requer correção manual do pedido, não do código.
+        # NÃO registrar no BD: depois que o pedido de compra for ajustado no Mega, o pedido deve
+        # voltar a ser processado normalmente na próxima execução (sem exigir reset manual do BD).
+        if status_code == 400 and "Valor Unitário" in erros and "Origem" in erros and "Recebimento" in erros:
+            log.warning(sanitize_emoji("  ⚠️  Valor Unitário do pedido de compra não confere com o total da fatura"))
+            match = re.search(r"Item:\s*\((\d+)\).*Origem:\s*\(([\d.,]+)\).*Recebimento\s*\(([\d.,]+)\)", erros)
+            origem = match.group(2) if match else ""
+            recebimento = match.group(3) if match else ""
+            msg = (f"Pedido de compra está com valor de R$ {origem} no Mega, e a Nota Fiscal está "
+                   f"com valor de R$ {recebimento}. Necessário solicitar ajuste do pedido de compra")
+            detalhes = {
+                "Nota Fiscal": num_nota,
+                "Item": match.group(1) if match else "",
+                "Valor cadastrado no pedido de compra (Origem)": origem,
+                "Valor da fatura calculado pelo RPA (Recebimento)": recebimento,
+            }
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+            res.status = "PedidoValorUnitarioDivergente"
+            res.mensagem = erros
+            log.info("╰─ Status final: %s (NÃO registrado no BD - pedido pode ser reprocessado após ajuste)", res.status)
             return res
 
         if status_code == 415:
