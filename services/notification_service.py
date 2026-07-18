@@ -155,6 +155,14 @@ class NotificationService:
         msg = "Falha ao capturar resultado da IA"
         self.erro(msg, pedido, tecnico=True)
 
+    def erro_anexo_protegido_senha(self, pedido: Any, anexo: str = "") -> None:
+        """Anexo protegido por senha - motivo já conhecido, não precisa de inspeção técnica."""
+        msg = "Arquivo protegido por senha - não é possível a leitura pela IA"
+        detalhes = {}
+        if anexo:
+            detalhes["Arquivo"] = anexo
+        self.erro(msg, pedido, tecnico=False, detalhes_extra=detalhes)
+
     def erro_consultar_anexos(self, pedido: Any) -> None:
         """Erro ao consultar anexos do pedido."""
         msg = "Falha ao consultar anexos do pedido"

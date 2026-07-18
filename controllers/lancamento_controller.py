@@ -5,7 +5,7 @@ Espelha a arvore do Power Automate, com bloqueios ANTES do lancamento
 
 LOGS DETALHADOS: Cada etapa do processamento é logada para facilitar debug.
 
-PALIATIVO PROVISÓRIO ATIVO (ver "Validação 9: PIS/COFINS reconhecidos" em
+PALIATIVO PROVISÓRIO ATIVO (ver "Validação 10: PIS/COFINS reconhecidos" em
 _validar_e_lancar_payload): pedidos com PIS/COFINS reconhecidos NÃO são lançados - vão para
 lançamento manual e ficam registrados no BD com status "Provisorio" para não reprocessar.
 Isso existe só porque ainda não há solução técnica confiável para lançar PIS/COFINS corretamente.
@@ -18,7 +18,10 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from config import CNPJ_CORRETO_POR_FANTASIA, CNPJ_VIBRA_ENERGIA, FANTASIAS_EXECUCAO_MANUAL, get_settings
+from config import (
+    ARQUIVOS_PROTEGIDOS_SENHA, CNPJ_CORRETO_POR_FANTASIA, CNPJ_TOMADOR_CORRETO_POR_FANTASIA,
+    CNPJ_VIBRA_ENERGIA, FANTASIAS_EXECUCAO_MANUAL, FANTASIAS_PROVAVEL_SENHA, get_settings,
+)
 from models import ResultadoPedido
 from services import business_rules as br
 from services import etl_service as etl
@@ -206,11 +209,21 @@ class LancamentoController:
         payloads: list[dict] = []
         contexto: dict[str, Any] = {}
         anexos_imagem: list[str] = []
+        anexos_protegidos: list[str] = []
 
         for idx, anexo in enumerate(anexos, 1):
             log.info("  ┌─ Anexo %d/%d", idx, len(anexos))
             nome = str(anexo.get("nomeArquivo", ""))
             log.info("  ├─ Arquivo: %s", nome)
+
+            # Verificar se é anexo com padrão conhecido de PDF protegido por senha (a IA nunca
+            # consegue ler, então nem tenta - evita esperar o timeout de ~7min para só então falhar)
+            if br.eh_anexo_protegido_por_senha(nome, ARQUIVOS_PROTEGIDOS_SENHA):
+                log.warning(sanitize_emoji("  ├─ ⚠️  Arquivo protegido por senha, leitura pela IA não é possível"))
+                anexos_protegidos.append(nome)
+                self.teams.erro_anexo_protegido_senha(pdc, nome)
+                log.info("  └─")
+                continue
 
             # Verificar se é imagem
             if nome.lower().endswith(IMAGENS):
@@ -237,8 +250,17 @@ class LancamentoController:
                 log.info("  │  └─ JSON completo da IA (primária):")
                 log.info("  │     %s", json.dumps(ia_raw, indent=2, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001
-                log.exception(sanitize_emoji("  │  ❌ Erro ao enviar Base64 para IA (pedido %s): %s"), pdc, exc)
-                self.teams.erro_ia_envio(pdc, nome)
+                if br.eh_fornecedor_provavel_senha(fantasia, FANTASIAS_PROVAVEL_SENHA):
+                    # Não é falha de execução do nosso código - fornecedor cujas faturas quase
+                    # sempre vêm protegidas por senha (ex.: TIM S/A), mesmo quando o nome do
+                    # arquivo não bateu com nenhum termo de ARQUIVOS_PROTEGIDOS_SENHA.
+                    log.warning(sanitize_emoji("  │  ⚠️  Falha ao ler anexo do fornecedor %s "
+                                                "(provável PDF protegido por senha): %s"), fantasia, exc)
+                    anexos_protegidos.append(nome)
+                    self.teams.erro_anexo_protegido_senha(pdc, nome)
+                else:
+                    log.exception(sanitize_emoji("  │  ❌ Erro ao enviar Base64 para IA (pedido %s): %s"), pdc, exc)
+                    self.teams.erro_ia_envio(pdc, nome)
                 log.info("  └─")
                 continue
 
@@ -258,6 +280,25 @@ class LancamentoController:
                 log.info("  └─")
                 continue
 
+            # Extração Equatorial (3a chamada, condicional) - só para faturas de energia elétrica
+            # do fornecedor Equatorial (ver docs/REGRAS_PROJETO.md secao 3.11). Extrai os valores
+            # individuais das seções FORNECIMENTO e ITENS FINANCEIROS da fatura, usados para
+            # calcular valorMercadoria/totalDespesa/valorDescontoGeral corretamente (o template
+            # genérico da extração primária não tem esses campos e deixa valorMercadoria = 0.00
+            # para esse tipo de documento).
+            equatorial_raw: dict = {}
+            if br.eh_fornecedor_equatorial(fantasia):
+                log.info(sanitize_emoji("  ├─ 🧠 Executando extração Equatorial (IA 3ª chamada, FORNECIMENTO/ITENS FINANCEIROS)..."))
+                try:
+                    equatorial_raw = self.ia.extrair_equatorial(base64_pdf)
+                    log.info(sanitize_emoji("  │  ✓ Extração Equatorial concluída"))
+                    log.info("  │  ├─ totalFornecimento: %s", equatorial_raw.get("totalFornecimento", ""))
+                    log.info("  │  └─ itensFinanceiros: %s", equatorial_raw.get("itensFinanceiros", []))
+                except Exception as exc:  # noqa: BLE001
+                    log.exception(sanitize_emoji("  │  ⚠️  Erro na extração Equatorial (pedido %s): %s - "
+                                                 "seguindo sem essa correção"), pdc, exc)
+                    equatorial_raw = {}
+
             # Consolidar resposta IA
             log.info(sanitize_emoji("  ├─ 🔄 Consolidando respostas IA..."))
             ia_final, cnpj_emit, cnpj_tom, tipo_doc = etl.consolidar_resposta_ia(ia_raw, extra_raw, pdc)
@@ -270,6 +311,75 @@ class LancamentoController:
                          fantasia, cnpj_emit, cnpj_emit_corrigido)
                 cnpj_emit = cnpj_emit_corrigido
                 ia_final["cnpjEmitente"] = cnpj_emit
+
+            # Corrigir CNPJ do tomador para fornecedores que a IA erra com frequência (de-para
+            # fixo em config/settings.py::CNPJ_TOMADOR_CORRETO_POR_FANTASIA - ex.: fatura de
+            # energia sem seção "Tomador" explícita, caso real Energisa Tocantins/pedido 25997)
+            cnpj_tom_corrigido = br.resolver_cnpj_tomador_corrigido(fantasia, cnpj_tom, CNPJ_TOMADOR_CORRETO_POR_FANTASIA)
+            if cnpj_tom_corrigido != cnpj_tom:
+                log.info(sanitize_emoji("  │  ℹ️  CNPJ tomador corrigido via de-para (fornecedor %s): %s -> %s"),
+                         fantasia, cnpj_tom, cnpj_tom_corrigido)
+                cnpj_tom = cnpj_tom_corrigido
+                ia_final["cnpjCpfTomador"] = cnpj_tom
+
+            # Corrigir emitente/tomador invertidos pela IA (comum em RECIBO/termo assinado por
+            # pessoa física prestadora - ver services/business_rules.py::corrigir_emitente_tomador_invertidos)
+            ia_final_corrigido = br.corrigir_emitente_tomador_invertidos(ia_final, cnpj_forn, cnpj_filial)
+            if ia_final_corrigido is not ia_final:
+                log.info(sanitize_emoji("  │  ℹ️  Emitente/Tomador invertidos pela IA - corrigido: "
+                                        "emitente %s -> %s | tomador %s -> %s"),
+                         cnpj_emit, ia_final_corrigido.get("cnpjEmitente", ""),
+                         cnpj_tom, ia_final_corrigido.get("cnpjCpfTomador", ""))
+                ia_final = ia_final_corrigido
+                cnpj_emit = ia_final.get("cnpjEmitente", "")
+                cnpj_tom = ia_final.get("cnpjCpfTomador", "")
+
+            # Equatorial não deve mais ter PIS/COFINS retidos no lançamento (decisão de negócio,
+            # não é o paliativo provisório da Validação 9 - aqui zeramos antes de montar o payload,
+            # então o documento segue para lançamento automático normalmente).
+            if br.eh_fornecedor_equatorial(fantasia):
+                ia_final = br.zerar_pis_cofins(ia_final)
+                log.info(sanitize_emoji("  │  ℹ️  Fornecedor Equatorial: PIS/COFINS zerados (não retidos no lançamento)"))
+                org_fantasia = str(pedido.get("ORG_ST_FANTASIA", ""))
+                if br.eh_filial_rapido_araguaia(org_fantasia):
+                    ia_final = br.zerar_icms(ia_final)
+                    log.info(sanitize_emoji("  │  ℹ️  Filial Rápido Araguaia + Equatorial: ICMS também zerado"))
+                # Ver docs/REGRAS_PROJETO.md secao 3.11: valorMercadoria = totalFornecimento (lido
+                # pronto da linha TOTAL da tabela "Itens da Fatura", nao mais somado linha a linha -
+                # ver ATUALIZACAO 6); totalDespesa = soma dos ITENS FINANCEIROS positivos;
+                # valorDescontoGeral = soma (em modulo) dos ITENS FINANCEIROS negativos.
+                total_fornecimento = equatorial_raw.get("totalFornecimento", "")
+                itens_financeiros = equatorial_raw.get("itensFinanceiros", [])
+                if not total_fornecimento:
+                    log.warning(sanitize_emoji("  │  ⚠️  Equatorial: extração de totalFornecimento veio vazia - "
+                                               "valorMercadoria pode ficar incorreto"))
+                ia_final = br.aplicar_valores_equatorial(ia_final, total_fornecimento, itens_financeiros)
+                log.info("  │  ℹ️  Equatorial: valorMercadoria=%s (totalFornecimento), totalDespesa=%s, "
+                         "valorDescontoGeral=%s", ia_final.get("valorMercadoria", ""),
+                         ia_final.get("totalDespesa", ""), ia_final.get("valorDescontoGeral", ""))
+
+                # Conferência obrigatória (ver docs/REGRAS_PROJETO.md secao 3.11): a extração das
+                # seções FORNECIMENTO/ITENS FINANCEIROS já se mostrou pouco confiável em uma fatura
+                # real (misturou a tabela "Itens da Fatura" com a caixa "Tributos" - valorMercadoria
+                # saiu R$623,62 quando o correto era R$284,46). Nunca lançar automaticamente sem
+                # essa reconciliação bater com o TOTAL da fatura.
+                reconciliado, detalhe_reconciliacao = br.reconciliacao_equatorial(ia_final)
+                if not reconciliado:
+                    log.warning(sanitize_emoji("  │  ⚠️  Equatorial: extração FORNECIMENTO/ITENS FINANCEIROS "
+                                               "não reconcilia com o total da fatura - %s"), detalhe_reconciliacao)
+                    detalhes_equatorial = {
+                        "Nota Fiscal": ia_final.get("numNota", ""),
+                        "Motivo": detalhe_reconciliacao,
+                        "totalFornecimento (extraído)": total_fornecimento,
+                        "itensFinanceiros (extraídos)": json.dumps(itens_financeiros, ensure_ascii=False),
+                    }
+                    self.teams.aviso(
+                        "Fatura de energia elétrica (Equatorial): a extração automática das seções "
+                        "FORNECIMENTO/ITENS FINANCEIROS não bateu com o total da fatura - requer "
+                        "conferência e lançamento manual (não lançado automaticamente por segurança)",
+                        pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes_equatorial)
+                    log.info("  └─")
+                    continue
             log.info(sanitize_emoji("  │  ✓ Consolidação concluída"))
             log.info("  │  ├─ Tipo Doc Final: %s", tipo_doc)
             log.info("  │  ├─ CNPJ Emitente: %s", cnpj_emit)
@@ -318,7 +428,9 @@ class LancamentoController:
 
             # Montar payload
             log.info(sanitize_emoji("  ├─ 📝 Montando payload de recebimento..."))
-            payload, bloq7 = etl.montar_payload(pedido, dados_pedido_filtrado, ia_final, cnpj_emit, tipo_doc, acao_conta, "", self.s.timezone)
+            payload, bloq7, diverge_pedido_nf = etl.montar_payload(
+                pedido, dados_pedido_filtrado, ia_final, cnpj_emit, tipo_doc, acao_conta, "", self.s.timezone,
+                is_equatorial=br.eh_fornecedor_equatorial(fantasia))
             log.info(sanitize_emoji("  │  ✓ Payload montado"))
             log.info("  │  ├─ Bloqueio 7 dias: %s", bloq7)
             log.info("  │  ├─ Total Nota: %s", payload.get("totalNota", ""))
@@ -335,6 +447,7 @@ class LancamentoController:
                 "nome_tomador": ia_final.get("nomeTomador", ""),
                 "tipo_doc": tipo_doc,
                 "bloqueia_7d": bloq7,
+                "diverge_pedido_nf": diverge_pedido_nf,
                 "data_documento": ia_final.get("dataDocumento", ""),
                 "cond_pagto": payload.get("condPagto", ""),
                 "data_vencimento": ia_final.get("dataVencimento", ""),
@@ -373,6 +486,19 @@ class LancamentoController:
                                     erro="Arquivo com extensão de imagem")
                 res.deve_lancar = False
                 res.status = "ImagemManual"
+                log.info("  └─ Status final: %s (registrado no BD)", res.status)
+                return [res]
+            if anexos_protegidos and len(anexos_protegidos) == len(anexos):
+                # Não é falha de execução do nosso código - é um impedimento do próprio arquivo.
+                # Já notificado no Teams (erro_anexo_protegido_senha) no momento em que o anexo
+                # protegido foi detectado - não repetir com um segundo erro genérico aqui, só
+                # registrar no BD (como Sucesso) para não reprocessar.
+                log.warning(sanitize_emoji("  ⚠️  Anexos protegidos por senha - execução manual necessária"))
+                erro_bd = ("Arquivo protegido por senha - não é possível a leitura pela IA. "
+                           f"Arquivo: {', '.join(anexos_protegidos)}")
+                self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd, erro=erro_bd)
+                res.deve_lancar = False
+                res.status = "SenhaProtegidaManual"
                 log.info("  └─ Status final: %s (registrado no BD)", res.status)
                 return [res]
             log.error(sanitize_emoji("  ❌ Nenhum payload válido gerado"))
@@ -631,7 +757,36 @@ class LancamentoController:
             log.info(sanitize_emoji("  │  ✓ Parcela única (0 ou 1 boleto anexado)"))
 
         # ═══════════════════════════════════════════════════════════════════
-        # Validação 9: PIS/COFINS reconhecidos
+        # Validação 9: Valor do pedido de compra x Nota Fiscal (bruto, documentos de serviço)
+        # ═══════════════════════════════════════════════════════════════════
+        # Ver docs/REGRAS_PROJETO.md secao 3.10. etl.montar_payload usa o valor do pedido de
+        # compra (soma) como valorMercadoria para nao divergir do que o Mega tem cadastrado -
+        # mas se o PROPRIO pedido de compra estiver cadastrado com um total diferente do bruto
+        # real da NF, o lancamento passaria no Mega (bate com o pedido) e registraria um valor
+        # ERRADO em relacao a nota fiscal real, sem nenhum aviso. Esta validacao reproduz, de
+        # forma proativa (antes de enviar ao Mega), a mesma protecao que antes vinha da rejeicao
+        # 400 do Mega ("Soma dos Valores das Parcelas x Total da Fatura").
+        log.info("  ├─ Validação 9: Valor do pedido de compra x Nota Fiscal (bruto)...")
+        diverge = contexto.get("diverge_pedido_nf")
+        if diverge:
+            log.warning(sanitize_emoji("  │  ⚠️  Valor do pedido de compra não confere com o bruto da Nota Fiscal - bloqueio ativado"))
+            msg = "Valor cadastrado no pedido de compra não confere com a Nota Fiscal - requer correção manual do pedido no Mega"
+            detalhes = {
+                "Nota Fiscal": payload.get("numNota", ""),
+                "Valor da Nota Fiscal (bruto)": diverge.get("valor_nf_bruto", ""),
+                "Valor cadastrado no pedido de compra": diverge.get("valor_pedido", ""),
+            }
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+            self.bpms.registrar(self.id_disparo, "Falha", num_pedido_bd,
+                                erro=f"Motivo: Valor da NF (bruto)={diverge.get('valor_nf_bruto', '')} diverge do "
+                                     f"valor cadastrado no pedido de compra={diverge.get('valor_pedido', '')}")
+            res.status = "PedidoValorDivergente"
+            log.info("  └─ Status final: %s (registrado no BD)", res.status)
+            return res
+        log.info(sanitize_emoji("  │  ✓ Valor do pedido de compra confere com o bruto da Nota Fiscal (ou sem valor extraído para comparar)"))
+
+        # ═══════════════════════════════════════════════════════════════════
+        # Validação 10: PIS/COFINS reconhecidos
         # ═══════════════════════════════════════════════════════════════════
         # ┌──────────────────────────────────────────────────────────────────────────────────┐
         # │ >>> PALIATIVO PROVISÓRIO - NÃO É REGRA DE NEGÓCIO DEFINITIVA <<<                  │
@@ -641,27 +796,30 @@ class LancamentoController:
         # │ REMOVER assim que a TI resolver: apagar este bloco e                               │
         # │ services/business_rules.py::eh_pis_cofins_reconhecido.                            │
         # └──────────────────────────────────────────────────────────────────────────────────┘
-        log.info("  ├─ Validação 9: PIS/COFINS reconhecidos no documento (bloqueio PROVISÓRIO)...")
-        if br.eh_pis_cofins_reconhecido(payload):
-            log.warning(sanitize_emoji("  │  ⚠️  PIS/COFINS reconhecidos no documento - bloqueio PROVISÓRIO (paliativo) ativado"))
-            msg = ("Documento possui valores de PIS/COFINS reconhecidos. Por problema técnico "
-                   "ainda em resolução no lançamento desses tributos, este pedido não será lançado "
-                   "automaticamente e requer lançamento manual. Ação PROVISÓRIA até ajuste da TI")
-            detalhes = {
-                "Nota Fiscal": payload.get("numNota", ""),
-                "valorPIS": payload.get("valorPIS", "0.00"),
-                "valorCOFINS": payload.get("valorCOFINS", "0.00"),
-            }
-            self.teams.aviso(msg, pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes)
-            self.bpms.registrar(self.id_disparo, "Provisorio", num_pedido_bd,
-                                erro=f"Motivo: PIS/COFINS reconhecidos (valorPIS={payload.get('valorPIS', '0.00')}, "
-                                     f"valorCOFINS={payload.get('valorCOFINS', '0.00')}) - bloqueio PROVISORIO "
-                                     f"(paliativo), lancamento manual ate ajuste da TI")
-            res.deve_lancar = False
-            res.status = "ProvisorioPisCofins"
-            log.info("  └─ Status final: %s (registrado no BD como Provisorio)", res.status)
-            return res
-        log.info(sanitize_emoji("  │  ✓ Sem PIS/COFINS reconhecidos"))
+        if not self.s.bloqueio_pis_cofins_ativo:
+            log.info("  ├─ Validação 10: PIS/COFINS - paliativo DESATIVADO (BLOQUEIO_PIS_COFINS_ATIVO=False no .env), pulando")
+        else:
+            log.info("  ├─ Validação 10: PIS/COFINS reconhecidos no documento (bloqueio PROVISÓRIO)...")
+            if br.eh_pis_cofins_reconhecido(payload):
+                log.warning(sanitize_emoji("  │  ⚠️  PIS/COFINS reconhecidos no documento - bloqueio PROVISÓRIO (paliativo) ativado"))
+                msg = ("Documento possui valores de PIS/COFINS reconhecidos. Por problema técnico "
+                       "ainda em resolução no lançamento desses tributos, este pedido não será lançado "
+                       "automaticamente e requer lançamento manual. Ação PROVISÓRIA até ajuste da TI")
+                detalhes = {
+                    "Nota Fiscal": payload.get("numNota", ""),
+                    "valorPIS": payload.get("valorPIS", "0.00"),
+                    "valorCOFINS": payload.get("valorCOFINS", "0.00"),
+                }
+                self.teams.aviso(msg, pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes)
+                self.bpms.registrar(self.id_disparo, "Provisorio", num_pedido_bd,
+                                    erro=f"Motivo: PIS/COFINS reconhecidos (valorPIS={payload.get('valorPIS', '0.00')}, "
+                                         f"valorCOFINS={payload.get('valorCOFINS', '0.00')}) - bloqueio PROVISORIO "
+                                         f"(paliativo), lancamento manual ate ajuste da TI")
+                res.deve_lancar = False
+                res.status = "ProvisorioPisCofins"
+                log.info("  └─ Status final: %s (registrado no BD como Provisorio)", res.status)
+                return res
+            log.info(sanitize_emoji("  │  ✓ Sem PIS/COFINS reconhecidos"))
         log.info("  └─ Todas as validações passaram")
 
         # ═══════════════════════════════════════════════════════════════════

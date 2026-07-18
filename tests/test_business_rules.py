@@ -13,6 +13,35 @@ def test_sem_override_mantem_tipo():
     assert br.resolver_tipo_doc_por_emitente("NF-E", "99999999000199") == "NF-E"
 
 
+def test_override_emitente_mei_goiania_forca_nfs_e():
+    assert br.resolver_tipo_doc_por_emitente("NFS-EG", "19164502000186") == "NFS-E"
+
+
+def test_corrige_emitente_tomador_invertidos():
+    ia = {
+        "nomeEmitente": "RAPIDO ARAGUAIA LTDA",
+        "cnpjEmitente": "01657436000110",
+        "nomeTomador": "SERGIO GLEIK DAVID",
+        "cnpjCpfTomador": "58870067149",
+    }
+    corrigido = br.corrigir_emitente_tomador_invertidos(ia, "58870067149", "01657436000110")
+    assert corrigido["cnpjEmitente"] == "58870067149"
+    assert corrigido["nomeEmitente"] == "SERGIO GLEIK DAVID"
+    assert corrigido["cnpjCpfTomador"] == "01657436000110"
+    assert corrigido["nomeTomador"] == "RAPIDO ARAGUAIA LTDA"
+
+
+def test_nao_corrige_emitente_tomador_quando_nao_invertidos():
+    ia = {
+        "nomeEmitente": "SERGIO GLEIK DAVID",
+        "cnpjEmitente": "58870067149",
+        "nomeTomador": "RAPIDO ARAGUAIA LTDA",
+        "cnpjCpfTomador": "01657436000110",
+    }
+    corrigido = br.corrigir_emitente_tomador_invertidos(ia, "58870067149", "01657436000110")
+    assert corrigido is ia
+
+
 def test_ajustar_bolp_detran():
     assert br.ajustar_bolp_detran("BOLP-DETRAN") == "BOLP"
     assert br.ajustar_bolp_detran("BOLP-DETRAN-IPVA-ANTT") == "BOLP"
@@ -61,6 +90,11 @@ def test_valida_tomador_por_nome():
     assert br.valida_tomador_x_filial("", "PONTAL ADMINISTRACAO", "15537", "") is True
 
 
+def test_valida_tomador_nome_com_espacamento_irregular():
+    assert br.valida_tomador_x_filial("", "RAPIDO  ARAGUAIA LTDA", "150103", "") is True
+    assert br.valida_tomador_x_filial("", "RAPIDO ARAGUAIA LTDA", "150103", "") is True
+
+
 def test_valida_tomador_ccp_cerrado_filial_235758():
     assert br.valida_tomador_x_filial(
         "13619137000251", "CCP CERRADO EMPREENDIMENTOS IMOBILIARIOS S.A.", "235758", "24357174000174"
@@ -99,9 +133,9 @@ def test_pis_cofins_reconhecido_na_raiz():
 
 
 def test_resolver_cnpj_emitente_corrigido():
-    de_para = {"CCP CERRADO EMPREENDIMENTOS IMOBILIARIOS S.A": "01543032000104"}
+    de_para = {"EQUATORIAL ENERGIA GOIAS": "01543032000104"}
     assert br.resolver_cnpj_emitente_corrigido(
-        "CCP Cerrado Empreendimentos Imobiliarios S.A", "340577401231", de_para
+        "Equatorial Energia Goias", "340577401231", de_para
     ) == "01543032000104"
     assert br.resolver_cnpj_emitente_corrigido("Outro Fornecedor", "12345678000199", de_para) == "12345678000199"
 

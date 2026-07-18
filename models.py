@@ -247,6 +247,7 @@ class PayloadRecebimento(BaseModel):
     dataMovimento: str = ""
     condPagto: str = ""
     valorMercadoria: str = ""
+    valorMercadoriaEmpenhada: str = ""
     totalNota: str = ""
     chaveAcesso: str = ""
     valorDescontoGeral: str = ""
@@ -259,6 +260,12 @@ class PayloadRecebimento(BaseModel):
     valorPIS: str = ""
     valorCOFINS: str = ""
     totalCSLL: str = ""
+    # Campos restaurados do template original do fluxo Power Automate (ver
+    # docs/REGRAS_PROJETO.md secao 3.7) - existiam no payload original enviado ao Mega e foram
+    # perdidos na reescrita em Python. TESTE EM VALIDACAO.
+    tragnCodigo: str = ""
+    tipoTrans: str = ""
+    icmsStreRecupera: str = ""
     valorBaseIPI: str = ""
     calculaValores: str = "N"
     operacao: str = ""

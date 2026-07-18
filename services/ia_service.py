@@ -29,6 +29,7 @@ def _limpar_json(texto: str) -> dict:
 class IaService:
     PROMPT_PRIMARIA = "prompt_1a_ia.txt"
     PROMPT_EXTRA = "prompt_2a_ia.txt"
+    PROMPT_EQUATORIAL = "prompt_3a_equatorial_ia.txt"
 
     def __init__(self, settings=None):
         self.s = settings or get_settings()
@@ -55,6 +56,8 @@ class IaService:
         # Polling com backoff exponencial (opcional)
         intervalo_atual = self.s.ia_poll_intervalo_inicial_s
         tempo_total = 0
+        tentativas_404_consecutivas = 0
+        MAX_404_CONSECUTIVOS = 5
 
         for tentativa in range(1, self.s.ia_poll_max_tentativas + 1):
             time.sleep(intervalo_atual)
@@ -64,6 +67,28 @@ class IaService:
                      tentativa, self.s.ia_poll_max_tentativas, tempo_total)
 
             st = request_json("GET", f"{status_base}/{job_id}", headers=headers, timeout=60)
+
+            if st.status_code == 404:
+                tentativas_404_consecutivas += 1
+                if tentativas_404_consecutivas >= MAX_404_CONSECUTIVOS:
+                    raise RuntimeError(
+                        f"Job IA {job_id} nao encontrado no servico de IA (404) apos "
+                        f"{tentativas_404_consecutivas} tentativas consecutivas em {tempo_total:.1f}s "
+                        "- job provavelmente nao foi criado/persistido"
+                    )
+                # O job pode ainda não estar visível na instância que atendeu esta
+                # verificação (propagação entre instâncias do serviço de IA).
+                # Trata como "ainda não pronto" em vez de abortar a extração, mas
+                # só por um numero limitado de tentativas (ver MAX_404_CONSECUTIVOS acima).
+                log.warning(
+                    sanitize_emoji("⚠️ Job %s ainda não encontrado no serviço de IA (404) "
+                                   "[%d/%d]. Tentando novamente..."),
+                    job_id, tentativas_404_consecutivas, MAX_404_CONSECUTIVOS)
+                if self.s.ia_poll_usar_backoff and intervalo_atual < self.s.ia_poll_intervalo_maximo_s:
+                    intervalo_atual = min(intervalo_atual * 2, self.s.ia_poll_intervalo_maximo_s)
+                continue
+
+            tentativas_404_consecutivas = 0
             st.raise_for_status()
             body = st.json()
             status = body.get("status", "UNKNOWN")
@@ -86,3 +111,9 @@ class IaService:
 
     def extrair_extra(self, base64_pdf: str) -> dict:
         return self._extrair(base64_pdf, _carregar_prompt(self.PROMPT_EXTRA))
+
+    def extrair_equatorial(self, base64_pdf: str) -> dict:
+        """3a chamada, condicional - só para faturas de energia eletrica (fornecedor Equatorial,
+        ver services/business_rules.py::eh_fornecedor_equatorial). Extrai os valores individuais
+        das secoes FORNECIMENTO e ITENS FINANCEIROS (ver docs/REGRAS_PROJETO.md secao 3.11)."""
+        return self._extrair(base64_pdf, _carregar_prompt(self.PROMPT_EQUATORIAL))

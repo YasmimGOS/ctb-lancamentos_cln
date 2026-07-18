@@ -48,6 +48,18 @@ def normaliza_cnpj(valor: object) -> str:
         return s.zfill(14)
 
 
+def normaliza_texto(valor: object) -> str:
+    """Normaliza texto para comparacao de nomes: colapsa qualquer sequencia de espacos
+    (incl. tabs e espaco nao-quebravel \xa0) em um unico espaco, remove espacos nas
+    pontas e converte para maiusculas.
+
+    Resolve falsos negativos quando o mesmo nome vem da IA com espacamento diferente
+    do cadastrado (ex.: espacos duplos ou nao-quebraveis entre palavras).
+    """
+    s = str(valor or "").replace("\xa0", " ")
+    return " ".join(s.split()).upper()
+
+
 def mesma_raiz(cnpj_a: str, cnpj_b: str) -> bool:
     a, b = normaliza_cnpj(cnpj_a), normaliza_cnpj(cnpj_b)
     return len(a) == 14 and len(b) == 14 and a[:8] == b[:8]

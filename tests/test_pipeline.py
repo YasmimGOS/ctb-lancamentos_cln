@@ -17,7 +17,7 @@ def test_montar_payload_nfse_iss_retido():
 
     ia_final, cnpj_emit, _, tipo = etl.consolidar_resposta_ia(ia, extra, pedido["PDC_IN_CODIGO"])
     acao = br.calcular_acao_e_conta(tipo, pedido["COND_ST_CODIGO"])
-    payload, bloq7 = etl.montar_payload(pedido, dados, ia_final, cnpj_emit, tipo, acao, "", "America/Sao_Paulo")
+    payload, bloq7, _diverge = etl.montar_payload(pedido, dados, ia_final, cnpj_emit, tipo, acao, "", "America/Sao_Paulo")
     p = PayloadRecebimento(**payload)
 
     assert p.numNota == "321"                 # zeros removidos

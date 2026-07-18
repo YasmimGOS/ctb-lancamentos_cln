@@ -104,6 +104,12 @@ Formatação:
    - Usar dd/MM/yyyy.
    - Se houver data e hora, ignorar a hora.
    - Se a data for ambígua, interpretar no padrão brasileiro dd/MM/yyyy.
+   - Quando o documento trouxer a data com ano de 2 dígitos (formato dd/MM/yy, ex.: "15/07/26"),
+     o terceiro grupo numérico é SEMPRE o ano, e o primeiro é SEMPRE o dia - NUNCA inverter a
+     ordem dia/ano. Expandir o ano de 2 dígitos usando o século 2000 (yy -> 20yy): "15/07/26"
+     é 15/07/2026, nunca "26/07/2015". Documentos processados neste fluxo são sempre recentes
+     (nunca do século passado), então um ano de 2 dígitos nunca deve virar 19xx nem ser
+     reordenado para outra posição da data.
 
 3. CNPJ e CPF:
    - Usar apenas números.
@@ -151,7 +157,11 @@ Classificação de `tipoDocFiscal`:
 3. CT-e ou DACTE: "CT-E".
 4. CT-e Outros Serviços: "CT-EOS".
 5. Nota Fiscal de Serviços da Prefeitura de Goiânia (determinado pelo município da empresa do
-   prestador de serviços e não deve ser confundido com `municipioPrestacao`): "NFS-EG".
+   prestador de serviços e não deve ser confundido com `municipioPrestacao`): "NFS-EG", EXCETO
+   quando o prestador for MEI (ver regra 15 abaixo) - nesse caso NÃO classificar como "NFS-EG"
+   aqui; classificar como "NFS-E". Antes de fechar a classificação como "NFS-EG", verificar
+   SEMPRE a regra 15 (indicação de MEI) - não decidir "NFS-EG" apenas por a cidade do prestador
+   ser Goiânia.
    ATENÇÃO - cidade do prestador deve ser EXATAMENTE "Goiânia" (a capital): municípios que apenas
    contêm a palavra "Goiânia" no nome, mas são cidades DIFERENTES, NUNCA geram "NFS-EG" - por
    exemplo "Aparecida de Goiânia", "Goianésia" e "Goianira" são municípios distintos de Goiânia.
@@ -171,8 +181,18 @@ Classificação de `tipoDocFiscal`:
 15. Se for NFS-e de Goiânia (cuidado para não confundir com nomes parecidos como "Goianira" ou
     "Aparecida de Goiânia")
     (determinado pelo município da empresa do prestador de serviços e não deve ser confundido com
-    `municipioPrestacao`) e houver indicação explícita de MEI, classificar como "NFS-E",
-    não "NFS-EG".
+    `municipioPrestacao`) e o prestador for MEI, classificar como "NFS-E", não "NFS-EG".
+    Considerar indicação de MEI tanto explícita quanto pelos indícios abaixo (não é necessário
+    que a palavra "MEI" apareça literalmente no documento):
+    - Texto "MEI", "Microempreendedor Individual", "Optante - Microempreendedor Individual (MEI)",
+      "Optante pelo MEI" ou "Empresário Individual" em qualquer campo (enquadramento tributário,
+      regime, observações) - inclusive quando aparecer como campo de rodapé/enquadramento perto
+      dos dados do prestador, e não apenas no corpo principal do documento;
+    - Nome/razão social do prestador (`nomeEmitente`) igual ao formato padrão de nome de MEI:
+      um número de CPF/CNPJ seguido do nome de uma pessoa física, SEM sufixo societário como
+      "LTDA", "EIRELI", "ME", "EPP", "S/A" ou "S.A." (ex.: "19.164.502 RONILSON COSTA DE MOURA").
+      Esse é o nome empresarial gerado automaticamente para MEI quando não há nome fantasia
+      registrado.
 16. Se houver NFS-e e boleto no mesmo arquivo, classificar pela NFS-e, não pelo boleto.
 17. Apólice de seguro, endosso de seguro, certificado de seguro, nota/aviso de seguro, ou qualquer
     documento emitido por SEGURADORA. Indicadores: "Apólice", "Nº Apólice", "Endosso",
@@ -184,6 +204,30 @@ Classificação de `tipoDocFiscal`:
     ficha de compensação, linha digitável ou código de barras no mesmo arquivo. Neste caso não é
     necessário extrair tributos nem valores: retornar campos monetários como "0.00" e textuais
     não aplicáveis como "".
+
+Definição de emitente/tomador em RECIBO:
+1. Em um RECIBO simples (ex.: "Recebi de [PAGADOR] a quantia de R$X referente a..."), quem PAGA
+   (a parte identificada após "recebi de") é o TOMADOR do serviço - o cliente/pagador. Quem
+   ASSINA o recibo e RECEBEU o pagamento (geralmente ao final do documento, muitas vezes uma
+   pessoa física/profissional autônomo) é o EMITENTE/PRESTADOR do serviço.
+2. NÃO confundir "tomador" com "quem tomou/recebeu o dinheiro". `cnpjCpfTomador` = sempre quem
+   CONTRATOU e PAGOU pelo serviço (o cliente), igual à definição usada em NF-e/NFS-e - nunca quem
+   assinou recebendo o valor.
+3. Exemplo: "Recebi de RAPIDO ARAGUAIA LTDA a quantia de R$ 900,00 ... Assinado: João da Silva"
+   -> `nomeEmitente`/`cnpjEmitente` = João da Silva (prestador, quem assina e recebeu o
+   pagamento); `nomeTomador`/`cnpjCpfTomador` = RAPIDO ARAGUAIA LTDA (quem pagou/contratou).
+
+Definição de `cnpjCpfTomador` em FATURA DE ENERGIA ELÉTRICA (DANF3E/DANFE3e):
+1. Esse tipo de documento normalmente NÃO tem seção rotulada "Tomador"/"Destinatário" - o campo
+   correto é **"PAGADOR CPF/CNPJ"**, que aparece na "Ficha de Compensação"/seção de boleto no fim
+   do documento. Use esse campo mesmo que outras regras deste prompt mandem ignorar boleto/ficha
+   de compensação para outros fins (ex.: chave de acesso) - para `cnpjCpfTomador` em fatura de
+   energia, essa seção é a fonte correta, não uma exceção a descartar.
+2. Armadilha conhecida: no cabeçalho/domicílio de entrega desses documentos, é comum aparecer um
+   número no formato de CPF (11 dígitos, ex.: "834.663.015-42") perto de dados do imóvel rural,
+   código de unidade consumidora, ou registro de produtor rural - esse número NÃO é o CNPJ/CPF do
+   tomador. NÃO use esse número como `cnpjCpfTomador` só porque tem formato de CPF e está perto do
+   nome do cliente - confirme sempre no campo "PAGADOR CPF/CNPJ" da ficha de compensação.
 
 Extração de `numNota` e `serie`:
 1. Usar o cabeçalho do documento fiscal principal.
@@ -236,16 +280,25 @@ Regra de data do documento (dataDocumento):
    Emissão" no layout de NFS-e. Ler o ano com atenção redobrada (dígito a dígito): erros de OCR
    trocando o último dígito do ano (ex.: "2026" lido como "2025") são comuns e graves, pois geram
    datas de vencimento incoerentes no fluxo posterior.
-7. Se "Data de Competência" vier incompleta (só mês/ano, ex.: "07/2026", sem o dia - comum quando o
+7. Se o documento também tiver o rótulo "Data de Geração" (a data em que a NFS-e foi gerada/emitida
+   no sistema, distinta de "Data de Competência" e de "Data de Emissão") E essa "Data de Geração"
+   for DIFERENTE da "Data de Competência" usada na regra 6, usar a "Data de Geração" como
+   `dataDocumento` em vez da Competência - nesse caso de divergência, a Data de Geração prevalece.
+   Se as duas datas forem iguais, não há necessidade de troca (o valor já usado pela regra 6 está
+   correto).
+8. Se "Data de Competência" vier incompleta (só mês/ano, ex.: "07/2026", sem o dia - comum quando o
    rótulo indica apenas o mês de referência contábil), NUNCA usar esse valor incompleto como
-   `dataDocumento`. Nesse caso, usar a "Data e Hora de Emissão" (ou "Data de Emissão") do próprio
-   documento, que traz o dia completo.
-8. `dataDocumento` deve SEMPRE ser retornado no formato completo dd/MM/yyyy, com dia, mês e ano.
+   `dataDocumento`. Nesse caso, usar a "Data de Geração" (se houver) ou a "Data e Hora de Emissão"
+   (ou "Data de Emissão") do próprio documento, que traz o dia completo.
+9. `dataDocumento` deve SEMPRE ser retornado no formato completo dd/MM/yyyy, com dia, mês e ano.
    Nunca retornar apenas mês/ano (ex.: "07/2026") nem apenas o ano.
-9. Conferência de plausibilidade do ano: se a data de emissão/competência extraída resultar em um
-   ano muito diferente do que seria esperado para um documento recente (e não houver nenhuma
-   indicação explícita no arquivo de que a nota é antiga), revisar a leitura do ano antes de
-   finalizar - é mais provável um erro de leitura de 1 dígito do que a nota ser de um ano anterior.
+10. Conferência de plausibilidade do ano: se a data de emissão/competência/geração extraída
+    resultar em um ano muito diferente do que seria esperado para um documento recente (e não
+    houver nenhuma indicação explícita no arquivo de que a nota é antiga), revisar a leitura do ano
+    antes de finalizar - é mais provável um erro de leitura de 1 dígito, ou uma inversão dia/ano em
+    data com ano de 2 dígitos (ver regra de "Datas" na Formatação), do que a nota ser de um ano
+    anterior. Ex.: uma "Data de Geração" impressa como "15/07/26" deve virar "15/07/2026", nunca
+    "26/07/2015".
 
 Regra de data de vencimento (dataVencimento):
 1. `dataVencimento` só deve ser preenchida quando o documento for um BOLETO ou ficha de

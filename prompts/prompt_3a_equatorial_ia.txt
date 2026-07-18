@@ -1,0 +1,122 @@
+Objetivo:
+Extrair, de uma fatura de energia elétrica (DANFE3e/NF3e, geralmente Equatorial Energia), DOIS
+conjuntos de dados: (1) o total da seção FORNECIMENTO, lido diretamente da linha "TOTAL" da tabela
+"Itens da Fatura" (não é necessário somar linha por linha); (2) os itens da seção "ITENS
+FINANCEIROS", um por um.
+
+Por que ler o total pronto em vez de somar cada linha de FORNECIMENTO: tentativas anteriores
+pediam para transcrever ou somar cada linha de FORNECIMENTO (normalmente 6 a 9 linhas, cada uma com
+6 a 8 números parecidos) e erraram repetidamente de formas diferentes (linhas desalinhadas, colunas
+trocadas, linhas duplicadas ou perdidas) - quanto mais linhas a fatura tem, mais a tarefa falha.
+A tabela "Itens da Fatura" já traz, na sua última linha ("TOTAL"), o total agregado de cada coluna,
+incluindo o total de FORNECIMENTO pronto - basta localizar e ler esse UM número, uma tarefa muito
+mais simples e confiável do que somar dezenas de números espalhados em várias linhas.
+
+ATENÇÃO - DUAS TABELAS DIFERENTES, NÃO CONFUNDIR:
+A fatura tem DUAS tabelas numéricas parecidas. Use SOMENTE a tabela "Itens da Fatura" e IGNORE
+COMPLETAMENTE a outra:
+1. Tabela "Itens da Fatura" (USAR ESTA) - tem duas seções de linhas ("FORNECIMENTO" e "ITENS
+   FINANCEIROS") e termina numa linha "TOTAL" com vários números.
+2. Caixa "Tributos" (IGNORAR POR COMPLETO PARA ITENS FINANCEIROS) - só 3 linhas fixas: "PIS/PASEP",
+   "ICMS", "COFINS" - é um RESUMO tributário do documento inteiro, não faz parte da tabela "Itens
+   da Fatura". Cuidado: é comum essa caixa aparecer bem perto (visualmente) da tabela "Itens da
+   Fatura" na mesma região da página, e alguns dos números dela podem coincidir ou parecer com
+   números da tabela "Itens da Fatura" - isso não os torna a mesma coisa.
+
+Como localizar o total de FORNECIMENTO (campo `totalFornecimento`):
+1. Encontre a linha "TOTAL" (a última linha da tabela "Itens da Fatura", logo abaixo da última
+   linha de ITENS FINANCEIROS).
+2. Essa linha tem uma sequência de vários números. Conte a partir da esquerda: o 1º número é o
+   total geral da fatura (igual ao "Valor Total do Documento"/valor a pagar). O `totalFornecimento`
+   que você deve extrair é o 3º número dessa sequência (contando da esquerda, 1-indexado).
+3. Esse 3º número normalmente é igual (ou muito próximo) à base de cálculo do ICMS que também
+   aparece na caixa "Tributos" - isso é esperado e NÃO é motivo para desconfiar do valor (o
+   fornecimento de energia é a própria base de cálculo do ICMS nesse tipo de documento). Use o
+   número tal como aparece na linha "TOTAL" da tabela "Itens da Fatura", não o da caixa "Tributos"
+   (ainda que sejam o mesmo valor).
+4. Se não conseguir localizar com certeza a linha "TOTAL" ou o 3º número dela, retorne
+   `totalFornecimento` = "".
+
+Template obrigatório:
+{
+  "totalFornecimento": "string",
+  "itensFinanceiros": [
+    {"descricao": "string", "valores": ["string", "..."]}
+  ]
+}
+
+Como preencher `itensFinanceiros`:
+1. Uma linha por item da seção "ITENS FINANCEIROS" da tabela "Itens da Fatura" (contribuições,
+   juros, multa, taxas, compensações, descontos etc.). NUNCA use "ITENS FINANCEIROS" (o título da
+   seção) nem "TOTAL" como `descricao` - não são linhas de item.
+2. `valores`: o(s) número(s) que aparece(m) naquela linha (normalmente só 1 número por linha),
+   exatamente como impressos.
+3. Formato de cada número: ponto como separador decimal, sem separador de milhar, sem "R$" nem "%".
+4. VALORES NEGATIVOS (descontos/créditos/estornos): algumas linhas podem vir com sinal negativo
+   impresso (ex.: "COMPENSAÇÃO DE DIC MENSAL -105,44", "-3,45", ou o número entre parênteses
+   "(105,44)"). Preserve o sinal de menos no texto transcrito (ex.: "-105.44"). NÃO remova o sinal,
+   NÃO transforme em positivo, NÃO ignore essa linha.
+5. RISCO DE CONFUSÃO - números repetidos entre tabelas diferentes: em algumas faturas, um número
+   que aparece na caixa "Tributos" (ex.: base de cálculo de um tributo) pode ser IDÊNTICO ou muito
+   parecido a um número que também aparece na tabela "Itens da Fatura". Isso NÃO significa que a
+   linha da caixa "Tributos" pertence a ITENS FINANCEIROS. Cada valor em `itensFinanceiros` deve
+   vir EXCLUSIVAMENTE do número impresso na MESMA linha visual da descrição em `itensFinanceiros`
+   (ex.: o número ao lado de "COMPENSAÇÃO DE DIC MENSAL", não um número parecido encontrado em
+   outro lugar do documento). Se você não conseguir localizar com certeza o número que está na
+   mesma linha de uma descrição de ITENS FINANCEIROS, é preferível retornar `[]` a inventar ou
+   pegar emprestado um valor de outra tabela.
+6. Nunca usar null; se não houver linhas nessa seção, retorne `[]`.
+
+Exemplo completo com dados REAIS da nota 199225903:
+Tabela "Itens da Fatura" impressa:
+  FORNECIMENTO
+  ADC BANDEIRA AMARELA   kWh   235,00   0,025054   5,89    0,34    5,89    19%   1,12    0,018850
+  CONSUMO                kWh   235,00   1,185396   278,57  16,07   278,57  19%   52,93   0,891810
+  ITENS FINANCEIROS
+  CONTRIB. ILUM. PÚBLICA - MUNICIPAL                        37,74
+  JUROS MORATÓRIA.                                            0,07
+  MULTA - 06/2026.                                             3,92
+  TAXA END. ALTERNATIVO                                        2,45
+  TOTAL                                                     328,64   16,41   284,46   54,05
+Extração CORRETA esperada (o `totalFornecimento` é o 3º número da linha TOTAL = "284.46", NÃO a
+soma manual das linhas de FORNECIMENTO):
+{
+  "totalFornecimento": "284.46",
+  "itensFinanceiros": [
+    {"descricao": "CONTRIB. ILUM. PÚBLICA - MUNICIPAL", "valores": ["37.74"]},
+    {"descricao": "JUROS MORATÓRIA", "valores": ["0.07"]},
+    {"descricao": "MULTA - 06/2026", "valores": ["3.92"]},
+    {"descricao": "TAXA END. ALTERNATIVO", "valores": ["2.45"]}
+  ]
+}
+
+Segundo exemplo, com um caso de DESCONTO (valor negativo) na nota 198531151 - ATENÇÃO ESPECIAL,
+pois uma tentativa anterior errou aqui (pegou os números da caixa "Tributos" em vez dos números
+reais de ITENS FINANCEIROS, e perdeu o sinal negativo):
+Tabela "Itens da Fatura" impressa:
+  ITENS FINANCEIROS
+  COMPENSAÇÃO DE DIC MENSAL                                  -105,44
+  JUROS MORATÓRIA.                                              0,56
+  MULTA - 06/2026.                                               3,73
+  TOTAL                                                       27,34    7,41  128,49   24,41
+Caixa "Tributos" (IGNORAR - mesmo que os números pareçam relevantes):
+  PIS/PASEP   104,07   1,267%    1,32
+  ICMS        128,49   19%      24,41
+  COFINS      104,07   5,8527%   6,09
+Extração CORRETA esperada (`totalFornecimento` = 3º número da linha TOTAL = "128.49"; note que
+128,49 também aparece na caixa Tributos - isso é esperado, veja regra 3 acima - use o valor da
+linha TOTAL de qualquer forma; itensFinanceiros preserva o sinal negativo do desconto):
+{
+  "totalFornecimento": "128.49",
+  "itensFinanceiros": [
+    {"descricao": "COMPENSAÇÃO DE DIC MENSAL", "valores": ["-105.44"]},
+    {"descricao": "JUROS MORATÓRIA", "valores": ["0.56"]},
+    {"descricao": "MULTA - 06/2026", "valores": ["3.73"]}
+  ]
+}
+
+Regras obrigatórias de saída:
+1. Retornar somente um objeto JSON válido UTF-8, sem comentários, Markdown ou texto fora do JSON.
+2. Retornar todos os atributos exatamente como no template. Não criar campos extras.
+3. Se o documento não for uma fatura de energia elétrica ou não tiver a tabela "Itens da Fatura",
+   retornar `totalFornecimento` = "" e `itensFinanceiros` = [].

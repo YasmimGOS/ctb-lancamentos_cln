@@ -58,11 +58,34 @@ Extração de `cnpjCpfTomador`:
    serviço), reconhecido em blocos rotulados como "Tomador de Serviços", "Tomador", "Dados do
    Tomador", "Destinatário" ou equivalente.
 2. NÃO usar o CNPJ do Prestador / Emitente do serviço.
-3. Retornar apenas os números, sem pontos, barras, hífens ou espaços.
-4. Ler dígito a dígito, com atenção; NUNCA reordenar, deslocar, inverter ou "arredondar" dígitos.
+3. Em RECIBO simples no formato "Recebi de [PAGADOR] a quantia de R$X...", o PAGADOR (a parte
+   após "recebi de") É o tomador - mesmo sem um rótulo explícito "Tomador"/"Destinatário". Quem
+   ASSINA o recibo e recebeu o pagamento é o prestador/emitente, NUNCA o tomador. Não inverta
+   essas duas partes.
+4. Se o documento realmente não tiver nenhuma parte pagadora identificável nem seção de
+   tomador/destinatário (nem o padrão "recebi de"), e a única informação de CNPJ/CPF disponível
+   for a do próprio emitente, NÃO copie o CNPJ/CPF do emitente para o campo `cnpjCpfTomador` só
+   para preencher algo: retorne `cnpjCpfTomador` = "".
+5. Retornar apenas os números, sem pontos, barras, hífens ou espaços.
+6. Ler dígito a dígito, com atenção; NUNCA reordenar, deslocar, inverter ou "arredondar" dígitos.
    Um CNPJ tem 14 dígitos e um CPF tem 11 dígitos.
-5. Se o número extraído não tiver 11 nem 14 dígitos após remover os separadores, revisar a leitura.
-6. Se não encontrar o tomador, usar "".
+7. Se o número extraído não tiver 11 nem 14 dígitos após remover os separadores, revisar a leitura.
+8. Se não encontrar o tomador, usar "".
+9. FATURA DE ENERGIA ELÉTRICA (DANF3E/DANFE3e, contas de luz em geral): esse tipo de documento
+   normalmente NÃO tem uma seção rotulada "Tomador" ou "Destinatário" - o campo correto e mais
+   confiável para `cnpjCpfTomador` é o campo **"PAGADOR CPF/CNPJ"**, que aparece na "Ficha de
+   Compensação"/seção de boleto no fim do documento (mesmo que a regra geral do processo interno
+   mande ignorar boleto/ficha de compensação para outros fins, como chave de acesso, NÃO ignore
+   essa seção para localizar o "PAGADOR CPF/CNPJ" - para faturas de energia, essa é a fonte correta
+   do CNPJ do tomador, não uma exceção a ser descartada).
+10. FATURA DE ENERGIA ELÉTRICA - ARMADILHA CONHECIDA: no cabeçalho/domicílio de entrega desses
+    documentos, é comum aparecer um número no formato de CPF (11 dígitos, ex.: "834.663.015-42")
+    perto de informações do imóvel rural, código de unidade consumidora, ou registro de produtor
+    rural (às vezes rotulado apenas "RURAL" ou sem rótulo nenhum) - esse número NÃO é o CNPJ/CPF do
+    tomador, é um identificador diferente (documento do produtor rural, cadastro de imóvel, código
+    de unidade consumidora, etc.). NÃO use esse número como `cnpjCpfTomador` só porque tem o formato
+    de CPF e está perto do nome do cliente - confirme sempre no campo "PAGADOR CPF/CNPJ" da ficha de
+    compensação, que é a fonte correta e não deve ser confundida com esse outro número.
 
 Extração de `valorISSRetido`:
 1. `valorISSRetido` = valor numérico do campo de RETENÇÃO do ISS/ISSQN, reconhecido pelos rótulos
@@ -210,9 +233,13 @@ como segunda leitura para validar, de forma cruzada, se o documento pertence à 
 Processo interno antes do JSON final:
 1. Identificar se há documento fiscal principal.
 2. Ignorar boleto, recibo, ficha de compensação, cobrança bancária e linha digitável quando houver
-   nota fiscal principal no mesmo arquivo.
+   nota fiscal principal no mesmo arquivo - EXCETO para extrair `cnpjCpfTomador` em faturas de
+   energia elétrica (DANF3E/DANFE3e), caso em que o campo "PAGADOR CPF/CNPJ" da ficha de
+   compensação é a fonte correta (ver regra 9 de extração de `cnpjCpfTomador` acima) e não deve ser
+   ignorado.
 3. Procurar chave de acesso somente no documento fiscal principal.
-4. Localizar o bloco do TOMADOR e extrair o `cnpjCpfTomador` (apenas números), sem deslocar dígitos.
+4. Localizar o bloco do TOMADOR (ou, em fatura de energia, o campo "PAGADOR CPF/CNPJ") e extrair o
+   `cnpjCpfTomador` (apenas números), sem deslocar dígitos.
 5. Procurar especificamente campos e expressões de ISS/ISSQN retido ou não retido.
 6. Diferenciar ISS/ISSQN apurado (Total do ISSQN / Vl. ISSQN) de ISS/ISSQN retido (ISSQN Retido /
    Vl. ISSQN Retido).

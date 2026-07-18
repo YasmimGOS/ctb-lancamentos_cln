@@ -136,11 +136,11 @@ def nome_fornecedor_confere(nomes_candidatos: list[str], nome_fantasia_pedido: s
     """Confere se algum dos nomes retornados pela consulta de fornecedor (fantasia/razão social)
     bate com o nome fantasia do pedido - usado para confirmar um CNPJ emitente via cadastro
     quando a leitura do documento não bate com o fornecedor esperado."""
-    alvo = (nome_fantasia_pedido or "").strip().upper()
+    alvo = val.normaliza_texto(nome_fantasia_pedido)
     if not alvo:
         return False
     for nome in nomes_candidatos:
-        candidato = (nome or "").strip().upper()
+        candidato = val.normaliza_texto(nome)
         if not candidato:
             continue
         if alvo in candidato or candidato in alvo:
@@ -150,12 +150,12 @@ def nome_fornecedor_confere(nomes_candidatos: list[str], nome_fantasia_pedido: s
 
 def valida_tomador_x_filial(cnpj_tomador: str, nome_tomador: str, filial_cod: str, cnpj_filial_pedido: str) -> bool:
     tomador = val.normaliza_cnpj(cnpj_tomador)
-    nome = (nome_tomador or "").strip().upper()
+    nome = val.normaliza_texto(nome_tomador)
     if tomador == "" and nome == "":
         return True
     filial = DEPARA_FILIAIS.get(str(filial_cod or "").strip(), {})
     cnpj_ref = val.normaliza_cnpj(filial.get("cnpj", ""))
-    nome_ref = (filial.get("nome", "") or "").strip().upper()
+    nome_ref = val.normaliza_texto(filial.get("nome", ""))
     if cnpj_ref and tomador == cnpj_ref:
         return True
     if nome_ref and nome_ref in nome:
@@ -355,10 +355,144 @@ def eh_fatura_execucao_manual(agn_st_fantasia: str, fantasias_manuais: set[str])
     return (agn_st_fantasia or "").strip().upper() in {f.upper() for f in fantasias_manuais}
 
 
+def eh_anexo_protegido_por_senha(nome_arquivo: str, termos_protegidos: set[str]) -> bool:
+    """Nome do arquivo contém termo conhecido de PDF protegido por senha (ex.: faturas Tim,
+    padrão "Tim -Val-...") - nesses casos a IA nunca consegue ler o conteúdo, então nem vale a
+    pena tentar (evita esperar o timeout de ~7min só para falhar)."""
+    nome_upper = (nome_arquivo or "").strip().upper()
+    return any(termo.upper() in nome_upper for termo in termos_protegidos)
+
+
+def eh_fornecedor_provavel_senha(agn_st_fantasia: str, fantasias_provavel_senha: set[str]) -> bool:
+    """Fornecedor cujas faturas quase sempre vêm em PDF protegido por senha (ex.: TIM S/A), usado
+    como rede de segurança: se a IA falhar ao ler o anexo desse fornecedor mesmo quando o nome do
+    arquivo não bateu com nenhum termo de ARQUIVOS_PROTEGIDOS_SENHA (variação de nomenclatura),
+    trata a falha como "protegido por senha" em vez de erro técnico genérico."""
+    return (agn_st_fantasia or "").strip().upper() in {f.upper() for f in fantasias_provavel_senha}
+
+
+def eh_fornecedor_equatorial(agn_st_fantasia: str) -> bool:
+    """Fornecedor Equatorial Goiás Distribuidora de Energia - a Equatorial não deve mais ter
+    PIS/COFINS retidos no lançamento (decisão de negócio, confirmada em 16/07/2026), mesmo quando
+    o documento traz esses valores. Ver zerar_pis_cofins."""
+    return "EQUATORIAL" in (agn_st_fantasia or "").strip().upper()
+
+
+def zerar_pis_cofins(ia: dict) -> dict:
+    """Zera PIS/COFINS (campos de raiz e de item) na resposta consolidada da IA - usado para
+    fornecedores que não devem mais ter esses tributos retidos no lançamento (ex.: Equatorial)."""
+    ia = dict(ia)
+    for campo in ("valorPIS", "percentualPIS", "basePIS", "valorCOFINS", "valorCofins",
+                  "percentualCofins", "baseCofins"):
+        ia[campo] = "0.00"
+    return ia
+
+
+def _valor_linha_financeira(item) -> float:
+    """Extrai o valor de uma linha de ITENS FINANCEIROS - normalmente só 1 número em `valores`.
+    Aceita formatos antigos (`valorReais` ou string simples) por compatibilidade."""
+    if isinstance(item, dict):
+        if "valores" in item:
+            valores = [fmt.to_float(v) for v in (item.get("valores") or [])]
+            return valores[0] if valores else 0.0
+        return fmt.to_float(item.get("valorReais", "0"))
+    return fmt.to_float(item)
+
+
+def _valores_reais(itens: list) -> list[float]:
+    """Extrai os valores numericos (em R$) de uma lista de itens de ITENS FINANCEIROS da extracao
+    Equatorial (ver _valor_linha_financeira). Ignora silenciosamente entradas malformadas."""
+    return [_valor_linha_financeira(item) for item in (itens or [])]
+
+
+def aplicar_valores_equatorial(ia: dict, total_fornecimento, itens_financeiros: list) -> dict:
+    """Faturas de energia elétrica (Equatorial) não preenchem o campo genérico "valorMercadoria"
+    do template padrão (não é um documento de mercadoria/serviço comum) - o próprio Mega valida o
+    item do recebimento contra o valor da seção FORNECIMENTO da fatura, não contra o total da
+    fatura. Ver docs/REGRAS_PROJETO.md secao 3.11 e caso real: pedido 872/nota 199225903, rejeitado
+    pelo Mega com "Origem: (284,46) - Recebimento (328,64)" - 284,46 é a soma de FORNECIMENTO,
+    328,64 e o TOTAL da fatura (FORNECIMENTO 284,46 + ITENS FINANCEIROS 44,18).
+
+    - `valorMercadoria` (raiz e item) = `total_fornecimento` - lido PRONTO da linha "TOTAL" da
+      tabela "Itens da Fatura" (3ª coluna, ver prompt_3a_equatorial_ia.txt), não mais somado a
+      partir da transcrição linha a linha de FORNECIMENTO. Motivo da mudança (17/07/2026): a
+      transcrição/soma linha a linha (6 a 9 linhas x 6 a 8 números cada) errou repetidas vezes de
+      formas diferentes (colunas trocadas, linhas desalinhadas/duplicadas/perdidas) mesmo após
+      várias rodadas de ajuste de prompt - ver docs/REGRAS_PROJETO.md secao 3.11. A fatura já
+      imprime esse total pronto na linha "TOTAL", então basta ler um único número em vez de somar
+      dezenas deles.
+    - `totalDespesa` ("despesas acessórias") = soma dos valores POSITIVOS de `itensFinanceiros`.
+    - `valorDescontoGeral` = soma (em módulo, sem sinal) dos valores NEGATIVOS de
+      `itensFinanceiros` (créditos/descontos/estornos).
+
+    `total_fornecimento`: string/número já pronto (não uma lista). `itens_financeiros`: lista de
+    `{"descricao": str, "valores": [str, ...]}` (ver prompt_3a_equatorial_ia.txt).
+
+    Se `total_fornecimento` vier vazio/zero, não sobrescreve `valorMercadoria` (mantém o valor que
+    a extração primária/fallback já tiver produzido) - evita zerar um documento por falha pontual
+    desta extração extra. A confiabilidade do resultado deve ser conferida separadamente com
+    `reconciliacao_equatorial` (soma deve bater com o valorTotalDocumento da fatura) ANTES de usar
+    este payload para lançamento."""
+    ia = dict(ia)
+    valor_fornecimento = fmt.to_float(total_fornecimento) if total_fornecimento not in (None, "") else 0.0
+    valores_financeiros = _valores_reais(itens_financeiros)
+
+    if valor_fornecimento:
+        ia["valorMercadoria"] = fmt.format_number(valor_fornecimento)
+
+    soma_despesas = sum(v for v in valores_financeiros if v > 0)
+    soma_descontos = sum(-v for v in valores_financeiros if v < 0)
+    ia["totalDespesa"] = fmt.format_number(soma_despesas)
+    ia["valorDescontoGeral"] = fmt.format_number(soma_descontos)
+    return ia
+
+
+def reconciliacao_equatorial(ia: dict, tolerancia: float = 0.05) -> tuple[bool, str]:
+    """Confere se a extração Equatorial (FORNECIMENTO/ITENS FINANCEIROS, ver
+    aplicar_valores_equatorial) é internamente consistente: valorMercadoria (FORNECIMENTO) +
+    totalDespesa (itens financeiros positivos) - valorDescontoGeral (itens financeiros negativos,
+    em módulo) deve bater com valorTotalDocumento (o TOTAL impresso na fatura, extraído de forma
+    independente na extração primária). Se não bater, a extração das seções da tabela "Itens da
+    Fatura" está errada (ex.: misturou colunas ou incluiu valores da caixa "Tributos" por engano -
+    caso real 17/07/2026, pedido 872/nota 199225903) e NÃO deve ser usada para lançamento.
+
+    Retorna (ok, detalhe) - `detalhe` é uma mensagem pronta para log/Teams quando ok=False."""
+    soma_calculada = (fmt.to_float(ia.get("valorMercadoria", "0"))
+                       + fmt.to_float(ia.get("totalDespesa", "0"))
+                       - fmt.to_float(ia.get("valorDescontoGeral", "0")))
+    total_esperado = fmt.to_float(ia.get("valorTotalDocumento", "0"))
+    if total_esperado <= 0:
+        # Sem total confiável para comparar - não bloqueia, mas também não há como validar.
+        return True, ""
+    diferenca = soma_calculada - total_esperado
+    if abs(diferenca) <= tolerancia:
+        return True, ""
+    detalhe = (f"FORNECIMENTO ({ia.get('valorMercadoria', '0')}) + despesas "
+               f"({ia.get('totalDespesa', '0')}) - descontos ({ia.get('valorDescontoGeral', '0')}) "
+               f"= {fmt.format_number(soma_calculada)}, mas o TOTAL da fatura é "
+               f"{ia.get('valorTotalDocumento', '0')} (diferença de {fmt.format_number(abs(diferenca))})")
+    return False, detalhe
+
+
+def eh_filial_rapido_araguaia(org_ou_fil_fantasia: str) -> bool:
+    """Filial/organização Rápido Araguaia - quando compradora de energia da Equatorial, também
+    não deve ter ICMS retido no lançamento (decisão de negócio, confirmada em 16/07/2026). Ver
+    zerar_icms."""
+    return "RAPIDO ARAGUAIA" in (org_ou_fil_fantasia or "").strip().upper()
+
+
+def zerar_icms(ia: dict) -> dict:
+    """Zera ICMS (campos de raiz e de item) na resposta consolidada da IA - usado para pedidos da
+    filial Rápido Araguaia com fornecedor Equatorial, que não deve ter ICMS retido no lançamento."""
+    ia = dict(ia)
+    for campo in ("valorICMS", "percentualIcms", "baseICMS"):
+        ia[campo] = "0.00"
+    return ia
+
+
 def resolver_cnpj_emitente_corrigido(agn_st_fantasia: str, cnpj_emitente_ia: str, de_para: dict[str, str]) -> str:
     """Corrige o CNPJ do emitente lido pela IA para fornecedores que ela erra com frequência (ex.:
-    administradoras que emitem boleto de rateio de energia citando a concessionária no documento -
-    a IA acaba confundindo emitente com tomador ou lendo um CNPJ incompleto).
+    lê um CNPJ incompleto/truncado em vez do CNPJ real do emitente).
 
     Usa o fornecedor cadastrado no PEDIDO (AGN_ST_FANTASIA), não o nome lido pela IA, porque é a
     fonte confiável. Retorna o CNPJ correto cadastrado em `de_para` quando o fornecedor está lá,
@@ -366,6 +500,44 @@ def resolver_cnpj_emitente_corrigido(agn_st_fantasia: str, cnpj_emitente_ia: str
     de_para_upper = {f.strip().upper(): cnpj for f, cnpj in de_para.items()}
     correto = de_para_upper.get((agn_st_fantasia or "").strip().upper())
     return val.normaliza_cnpj(correto) if correto else cnpj_emitente_ia
+
+
+def resolver_cnpj_tomador_corrigido(agn_st_fantasia: str, cnpj_tomador_ia: str, de_para: dict[str, str]) -> str:
+    """Corrige o CNPJ do tomador lido pela IA para fornecedores que ela erra com frequência (ex.:
+    fatura de energia elétrica sem seção "Tomador" explícita, onde a IA pode confundir outro
+    número de 11 dígitos - CPF de produtor rural, registro de imóvel etc. - com o CNPJ do
+    tomador). Mesmo padrão de `resolver_cnpj_emitente_corrigido`, mas para o tomador.
+
+    Usa o fornecedor cadastrado no PEDIDO (AGN_ST_FANTASIA), não o nome lido pela IA. Retorna o
+    CNPJ correto cadastrado em `de_para` quando o fornecedor está lá, senão devolve
+    `cnpj_tomador_ia` sem alteração."""
+    de_para_upper = {f.strip().upper(): cnpj for f, cnpj in de_para.items()}
+    correto = de_para_upper.get((agn_st_fantasia or "").strip().upper())
+    return val.normaliza_cnpj(correto) if correto else cnpj_tomador_ia
+
+
+def corrigir_emitente_tomador_invertidos(ia: dict, cnpj_forn_esperado: str, cnpj_filial_esperado: str) -> dict:
+    """Corrige quando a IA troca emitente e tomador (comum em RECIBO/TERMO assinado por pessoa
+    fisica prestadora de servico, onde a IA confunde quem pagou com quem recebeu o pagamento).
+
+    Sinal de troca: `cnpjEmitente` extraido bate com o CNPJ da FILIAL (quem pagou, deveria ser o
+    tomador) e `cnpjCpfTomador` extraido bate com o CNPJ do FORNECEDOR cadastrado no pedido (quem
+    prestou o servico, deveria ser o emitente) - exatamente invertido do esperado. Corrige caso
+    real: pedido 320931, RECIBO/termo de SERGIO GLEIK DAVID (CPF) lido com nomeEmitente/
+    cnpjEmitente = RAPIDO ARAGUAIA (filial) e nomeTomador/cnpjCpfTomador = SERGIO GLEIK (o
+    prestador de fato)."""
+    cnpj_forn_esperado = val.normaliza_cnpj(cnpj_forn_esperado)
+    cnpj_filial_esperado = val.normaliza_cnpj(cnpj_filial_esperado)
+    if not cnpj_forn_esperado or not cnpj_filial_esperado or cnpj_forn_esperado == cnpj_filial_esperado:
+        return ia
+    cnpj_emit = val.normaliza_cnpj(ia.get("cnpjEmitente", ""))
+    cnpj_tom = val.normaliza_cnpj(ia.get("cnpjCpfTomador", ""))
+    if cnpj_emit != cnpj_filial_esperado or cnpj_tom != cnpj_forn_esperado:
+        return ia
+    ia = dict(ia)
+    ia["cnpjEmitente"], ia["cnpjCpfTomador"] = ia.get("cnpjCpfTomador", ""), ia.get("cnpjEmitente", "")
+    ia["nomeEmitente"], ia["nomeTomador"] = ia.get("nomeTomador", ""), ia.get("nomeEmitente", "")
+    return ia
 
 
 # ══════════════════════════════════════════════════════════════════════════════

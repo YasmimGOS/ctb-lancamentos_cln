@@ -96,6 +96,12 @@ class Settings(BaseModel):
     ia_poll_max_tentativas: int = int(os.getenv("IA_POLL_MAX_TENTATIVAS", "30") or "30")
     ia_poll_usar_backoff: bool = _bool(os.getenv("IA_POLL_USAR_BACKOFF", "true"))
 
+    # PALIATIVO PROVISÓRIO (ver docs/REGRAS_PROJETO.md secao 3.6): liga/desliga o bloqueio de
+    # lancamento quando ha PIS/COFINS reconhecidos no documento. True = paliativo ativo (bloqueia
+    # e manda para lancamento manual). False = desativa o bloqueio (documento com PIS/COFINS
+    # lanca normalmente) - usar quando a TI resolver o lancamento correto desses tributos.
+    bloqueio_pis_cofins_ativo: bool = _bool(os.getenv("BLOQUEIO_PIS_COFINS_ATIVO", "true"))
+
     @property
     def filtro_pedidos_list(self) -> list[int]:
         """Filtro por PDC_IN_CODIGO (equivalente ao 'Matriz do filtro' do fluxo).
@@ -151,7 +157,14 @@ TABELA_DEPARA_TIPODOC: dict[str, dict[str, object]] = {
     "DANFCom": {"contasPagarTipoDoc": "NFF", "acao_vista": 295, "acao_prazo": 82},
 }
 
-TIPO_DOC_POR_EMITENTE: dict[str, str] = {"61074175000138": "BOLP"}
+TIPO_DOC_POR_EMITENTE: dict[str, str] = {
+    "61074175000138": "BOLP",
+    # MEI em Goiania: o documento tinha "Optante - Microempreendedor Individual (MEI)" explicito,
+    # mas a IA classificou pela cidade do prestador (Goiania -> NFS-EG) antes de checar a excecao
+    # de MEI (prompts/prompt_1a_ia.txt, regra 15). Para MEI a nota deve ser NFS-E. Corrige caso
+    # real: pedido 320904, RONILSON COSTA DE MOURA lancado como NFS-EG.
+    "19164502000186": "NFS-E",
+}
 CNPJ_ALUGUEL_IR = "03397056000110"
 CNPJ_VIBRA_ENERGIA = "34274233030605"
 CNPJ_APLICACAO_281 = "04554425000120"
@@ -174,11 +187,43 @@ TIPOS_DOC_SERVICO = {"NFS-EG", "NFS-E", "NFF", "NFSTE", "NFSC"}
 # nunca deve ir para execução automática; sempre lançamento manual.
 FANTASIAS_EXECUCAO_MANUAL = {"CIA METROPOLITANA DE TRANSPORTE COLETIVO"}
 
+# Termos conhecidos no nome do arquivo de anexo que indicam PDF protegido por senha (a IA nunca
+# consegue ler o conteúdo, o job trava em PROCESSING e falha por timeout - ex.: pedido 137203,
+# nota Tim, arquivo "Tim -Val- 5813689404 - 11-08-2026.pdf"). Ao detectar o termo, pula a chamada
+# de IA e já reporta o motivo, em vez de esperar os ~7min de timeout para só então falhar.
+ARQUIVOS_PROTEGIDOS_SENHA = {"TIM -VAL"}
+
+# Fornecedores (AGN_ST_FANTASIA) cujas faturas quase sempre vêm em PDF protegido por senha, MESMO
+# quando o nome do arquivo não bate com nenhum termo de ARQUIVOS_PROTEGIDOS_SENHA (variação de
+# nomenclatura futura). Rede de segurança: se a chamada de IA falhar (extrair_primaria) para um
+# fornecedor desta lista, o erro é tratado como "arquivo protegido por senha" (não é falha real do
+# nosso código) em vez do erro técnico genérico - ver
+# controllers/lancamento_controller.py::processar_pedido.
+FANTASIAS_PROVAVEL_SENHA = {"TIM S/A"}
+
 # De-para fantasia (AGN_ST_FANTASIA do pedido) -> CNPJ correto do emitente, usado para corrigir a
-# leitura da IA em fornecedores que ela erra com frequência (ex.: administradoras que emitem
-# boleto de rateio de energia citando a concessionária no documento - a IA acaba confundindo
-# emitente com tomador ou lendo um CNPJ incompleto/errado). Ver
+# leitura da IA em fornecedores que ela erra com frequência (ex.: a IA lê um CNPJ incompleto/
+# truncado, tipo "340577401231" em vez do CNPJ real). Ver
 # services/business_rules.py::resolver_cnpj_emitente_corrigido.
 CNPJ_CORRETO_POR_FANTASIA: dict[str, str] = {
-    "CCP CERRADO EMPREENDIMENTOS IMOBILIARIOS S.A": "01543032000104",
+    # Equatorial Goiás Distribuidora de Energia S.A. (emitente) - confirmado em 16/07/2026.
+    "EQUATORIAL ENERGIA GOIAS": "01543032000104",
+}
+
+# De-para fantasia (AGN_ST_FANTASIA do pedido) -> CNPJ correto do TOMADOR, usado como
+# safety-net adicional (além da correção de prompt) para fornecedores cuja fatura a IA erra
+# com frequência ao identificar o CNPJ do tomador (ex.: fatura de energia elétrica sem seção
+# "Tomador" explícita, onde a IA pode confundir outro número de 11 dígitos - CPF de produtor
+# rural, registro de imóvel etc. - com o CNPJ do tomador). Só usar quando o fornecedor
+# atender SEMPRE a mesma filial/CNPJ tomador nesta operação - se um mesmo fornecedor passar a
+# faturar filiais diferentes, este de-para precisa ser revisto (não é uma verdade universal
+# do fornecedor, é uma coincidência operacional). Ver
+# services/business_rules.py::resolver_cnpj_tomador_corrigido.
+CNPJ_TOMADOR_CORRETO_POR_FANTASIA: dict[str, str] = {
+    # Energisa Tocantins - Distribuidora de Energia S.A. (fornecedor) -> tomador Araguarina
+    # Agropastoril Ltda - Faz. Pé do Morro (filial 46) - confirmado em 17/07/2026, caso real:
+    # pedido 25997/nota 7853277, IA leu "834.663.015-42" (número de registro rural impresso
+    # perto do endereço de entrega) em vez do CNPJ real, impresso no campo "PAGADOR CPF/CNPJ"
+    # da ficha de compensação.
+    "ENERGISA TOCANTINS - DISTRIBUIDORA DE ENERGIA S.A": "02737815000183",
 }
