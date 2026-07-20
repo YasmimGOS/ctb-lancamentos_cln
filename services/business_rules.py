@@ -148,7 +148,8 @@ def nome_fornecedor_confere(nomes_candidatos: list[str], nome_fantasia_pedido: s
     return False
 
 
-def valida_tomador_x_filial(cnpj_tomador: str, nome_tomador: str, filial_cod: str, cnpj_filial_pedido: str) -> bool:
+def valida_tomador_x_filial(cnpj_tomador: str, nome_tomador: str, filial_cod: str, cnpj_filial_pedido: str,
+                            nome_filial_pedido: str = "") -> bool:
     tomador = val.normaliza_cnpj(cnpj_tomador)
     nome = val.normaliza_texto(nome_tomador)
     if tomador == "" and nome == "":
@@ -164,13 +165,24 @@ def valida_tomador_x_filial(cnpj_tomador: str, nome_tomador: str, filial_cod: st
         return True
     if val.mesma_raiz(tomador, cnpj_filial_pedido):
         return True
+    # Regra: nome do tomador bate com o nome da filial cadastrada na base (FIL_ST_FANTASIA), mesmo
+    # que o CNPJ do tomador tenha sido lido errado pela IA (ex.: erro de OCR em documento
+    # escaneado) - caso real pedido 5777, CNPJ lido "03255577000124" em vez de "24357174000174",
+    # mas nome extraído batia com "CONDOMINIO SHOPPING CENTER CERRADO - MATRIZ".
+    nome_filial_ref = val.normaliza_texto(nome_filial_pedido)
+    if nome_filial_ref and nome and (nome_filial_ref in nome or nome in nome_filial_ref):
+        return True
     return False
 
 
-def valida_tomador_x_filial_multi(candidatos: list[tuple[str, str]], filial_cod: str, cnpj_filial_pedido: str) -> bool:
+def valida_tomador_x_filial_multi(candidatos: list[tuple[str, str]], filial_cod: str, cnpj_filial_pedido: str,
+                                   nome_filial_pedido: str = "") -> bool:
     """Confere se PELO MENOS UM dos pares (cnpj_tomador, nome_tomador) lidos entre os anexos do
     pedido bate com a filial esperada - mesma lógica de redundância usada para o emitente."""
-    return any(valida_tomador_x_filial(cnpj, nome, filial_cod, cnpj_filial_pedido) for cnpj, nome in candidatos)
+    return any(
+        valida_tomador_x_filial(cnpj, nome, filial_cod, cnpj_filial_pedido, nome_filial_pedido)
+        for cnpj, nome in candidatos
+    )
 
 
 def normaliza_cond_pagto(cond: str) -> str:

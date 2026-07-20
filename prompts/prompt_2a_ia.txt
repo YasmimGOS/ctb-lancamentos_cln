@@ -45,6 +45,19 @@ Extração de `chaveAcesso`:
 4. Se houver número com 44 dígitos claramente identificado como chave de acesso, preencher
    `chaveAcesso`.
 5. Se não houver chave de 44 dígitos, usar "".
+6. No documento, a chave é sempre impressa em 11 grupos de 4 dígitos separados por espaço
+   (ex.: "5226 0707 0719 7700 0149 5500 1000 0003 0718 9013 1292"). Leia grupo por grupo, da
+   esquerda para a direita, e conte: devem ser exatamente 11 grupos.
+7. Cuidado especial: dois grupos vizinhos podem parecer iguais ou muito parecidos (ex.: "0707"
+   seguido de "0719"). Não pule nem funda grupos parecidos - transcreva cada um separadamente,
+   mesmo que pareçam repetidos. Se o resultado final tiver menos de 44 dígitos, você pulou ou
+   fundiu algum grupo por engano - reconte os 11 grupos antes de responder.
+8. Armadilha de dígitos repetidos DENTRO do mesmo grupo (ex.: "1811", "7700", "0022" - dois
+   dígitos idênticos lado a lado): é comum "engolir" um dos dois e ler só um, encurtando o
+   grupo para 3 caracteres e a chave inteira para 43 dígitos em vez de 44. Ao encontrar um
+   grupo com dígitos repetidos, conte os 4 caracteres um a um antes de seguir para o próximo
+   grupo - nunca funda dois dígitos iguais em um só. Caso real: grupo correto "1811" foi lido
+   como "181" (perdeu um dos dois "1"), o que sozinho já derruba a chave para 43 dígitos.
 6. Nunca usar número da nota, número do documento, número do boleto, nosso número, linha digitável,
    código de barras bancário, número do RPS, protocolo, lote, pedido ou parcela como chave de
    acesso.
@@ -107,8 +120,9 @@ Distinção obrigatória entre campos:
 - "Total do ISSQN" / "Vl. ISSQN" / "Valor do ISSQN" (sem a palavra "Retido") = ISS APURADO /
   a recolher pelo prestador. Esse campo NÃO indica retenção e o seu valor (mesmo zero) NÃO deve ser
   usado para decidir issRetido.
-- "ISSQN Retido" / "ISS Retido" / "Vl. ISSQN Retido" / "Valor ISSQN Retido" / "Tipo de Retenção" =
-  campo de RETENÇÃO. Somente este campo (e as expressões de retenção) decide issRetido.
+- "ISSQN Retido" / "ISS Retido" / "Vl. ISSQN Retido" / "Valor ISSQN Retido" / "Tipo de Retenção" /
+  "ISS a Reter" / "Responsável pela Retenção" = campo de RETENÇÃO. Somente este campo (e as
+  expressões de retenção) decide issRetido.
 
 Retornar `"issRetido": true` somente quando houver indicação explícita e inequívoca de retenção
 positiva do ISS/ISSQN, como:
@@ -125,6 +139,10 @@ positiva do ISS/ISSQN, como:
 11. "ISS Retido" com valor monetário maior que zero
 12. "ISSQN Retido" com valor monetário maior que zero
 13. Seção de retenções indicando ISS/ISSQN com valor maior que zero
+14. "ISS a Reter: 1 - Sim", "ISS a Reter: 1", "Iss a Reter: Sim" ou equivalente (padrão ABRASF de
+    NFS-e de diversos municípios, onde o campo é um código numérico: 1 = Sim/retido).
+15. "Responsável pela Retenção: Tomador" ou "Responsável pela Retenção: 3 - Tomador" (código ABRASF
+    de responsável pela retenção do ISS apontando para o tomador).
 
 Retornar `"issRetido": false` quando houver qualquer indicação explícita de não retenção, como:
 1. "ISS Retido: Não"
@@ -143,6 +161,7 @@ Retornar `"issRetido": false` quando houver qualquer indicação explícita de n
 14. "ISSQN Retido" com valor "0,00", "0.00", "-", vazio, "Não", "Nao" ou "N"
 15. Seção de retenções com ISS/ISSQN igual a zero
 16. Documento com ISS/ISSQN apurado, mas com campo explícito "ISSQN Retido: Não"
+17. "ISS a Reter: 2 - Não", "ISS a Reter: 2" ou "ISS a Reter: Não" (código ABRASF 2 = Não/não retido).
 
 Regra de precedência absoluta para `issRetido`:
 1. Primeiro, procure expressões explícitas de retenção positiva.
@@ -220,6 +239,62 @@ Então o JSON obrigatório é:
   "cnpjCpfTomador": "",
   "numNota": ""
 }
+
+Terceiro caso típico que deve retornar true (layout de 3 colunas, ARMADILHA CONHECIDA - caso real
+NFS-e de Goiânia, pedido 320970/nota 988, 20/07/2026):
+Se o documento apresentar 3 blocos lado a lado, por exemplo:
+- Bloco "Detalhamento de Valores - Prestador dos Serviços":
+  - Valor dos Serviços: 550,00
+  - (-) ISS Retido: 23,04
+  - (=) Valor Líquido: 526,96
+- Bloco "Cálculo do ISSQN devido no Município" (bloco DIFERENTE, mais à direita):
+  - Base de Cálculo: 550,00
+  - Alíquota (%): 4,19
+  - ISS a reter: 1 - Sim
+  - (=) Valor ISS: 0,00
+Então o JSON obrigatório é:
+{
+  "chaveAcesso": "",
+  "issRetido": true,
+  "valorISSRetido": "23.04",
+  "cnpjCpfTomador": "",
+  "numNota": ""
+}
+ARMADILHA: o "(=) Valor ISS: 0,00" dentro do bloco "Cálculo do ISSQN devido no Município" NÃO
+significa que não houve retenção - esse campo representa o ISS que o PRÓPRIO PRESTADOR ainda
+deveria pagar diretamente, e ele é 0,00 exatamente PORQUE a retenção pelo tomador ("ISS a reter:
+1 - Sim") já cobre toda a obrigação. Ignore esse "Valor ISS: 0,00" para decidir `issRetido` - o que
+decide é exclusivamente "ISS a reter: 1 - Sim" (regra 14 acima) e/ou o valor positivo em "ISS
+Retido" (23,04) no outro bloco. NÃO deixe um "0,00" presente em QUALQUER campo próximo fazer você
+retornar `issRetido: false` quando já existir uma indicação explícita de retenção positiva em outro
+campo do mesmo documento.
+
+Quarto caso típico que deve retornar false (tabela de 5 colunas lado a lado, ARMADILHA CONHECIDA -
+caso real NFS-e de Aparecida de Goiânia, prestador Sgm Comunicacao Visual, pedido 5841/nota 1457,
+20/07/2026):
+Se o documento apresentar uma única linha de tabela com 5 colunas, na ordem:
+TOTAL LÍQUIDO DA NOTA (R$) | BASE DE CÁLCULO ISSQN (R$) | ALÍQUOTA ISSQN (%) | VALOR DO ISSQN (R$) |
+VALOR DO ISSQN RETIDO (R$)
+2.250,00 | 2.250,00 | 4,41 | 99,22 | 0,00
+Então o JSON obrigatório é:
+{
+  "chaveAcesso": "",
+  "issRetido": false,
+  "valorISSRetido": "0.00",
+  "cnpjCpfTomador": "",
+  "numNota": "1457"
+}
+ARMADILHA: as duas últimas colunas ficam lado a lado e têm nomes muito parecidos - "VALOR DO ISSQN
+(R$)" (4ª coluna, é o ISS apurado/devido, aqui 99,22) e "VALOR DO ISSQN RETIDO (R$)" (5ª coluna, é a
+retenção de fato, aqui 0,00). É fácil contar errado a posição e pegar o valor da 4ª coluna (99,22)
+como se fosse o da 5ª - foi exatamente esse erro que causou o lançamento incorreto do pedido
+5841/nota 1457 com `issRetido: true` e `valorISSRetido: 99.22`, quando o documento já dizia
+explicitamente que o ISSQN Retido era 0,00. Para tabelas desse tipo (vários cabeçalhos numéricos em
+uma linha, valores em outra linha logo abaixo, sem nenhuma palavra "Sim"/"Não" no meio): conte os
+cabeçalhos da esquerda para a direita e os valores da esquerda para a direita, na MESMA ordem, e
+só use o valor que está exatamente sob o cabeçalho "VALOR DO ISSQN RETIDO" (o ÚLTIMO da linha,
+nunca o penúltimo) para decidir `issRetido`/`valorISSRetido`. Se esse último valor for "0,00",
+`issRetido` é false mesmo que o "VALOR DO ISSQN" (penúltima coluna) seja maior que zero.
 
 Motivo operacional desta regra:
 Em NFS-e, é comum existir ISS/ISSQN calculado ou apurado na nota, com base, alíquota e valor. Isso

@@ -134,6 +134,19 @@ Formatação:
 4. Chave de acesso NF-e/NFC-e/CT-e/NFS-e:
    - Deve conter exatamente 44 dígitos.
    - Remover qualquer caractere não numérico.
+   - No documento, a chave é sempre impressa em 11 grupos de 4 dígitos separados por espaço
+     (ex.: "5226 0707 0719 7700 0149 5500 1000 0003 0718 9013 1292"). Leia grupo por grupo, da
+     esquerda para a direita, e conte: devem ser exatamente 11 grupos.
+   - Cuidado especial: dois grupos vizinhos podem parecer iguais ou muito parecidos (ex.: "0707"
+     seguido de "0719"). Não pule nem funda grupos parecidos - transcreva cada um
+     separadamente, mesmo que pareçam repetidos. Se o resultado final tiver menos de 44 dígitos,
+     você pulou ou fundiu algum grupo por engano - reconte os 11 grupos antes de responder.
+   - Armadilha de dígitos repetidos DENTRO do mesmo grupo (ex.: "1811", "7700", "0022" - dois
+     dígitos idênticos lado a lado): é comum "engolir" um dos dois e ler só um, encurtando o
+     grupo para 3 caracteres e a chave inteira para 43 dígitos em vez de 44. Ao encontrar um
+     grupo com dígitos repetidos, conte os 4 caracteres um a um antes de seguir para o próximo
+     grupo - nunca funda dois dígitos iguais em um só. Caso real: grupo correto "1811" foi lido
+     como "181" (perdeu um dos dois "1"), o que sozinho já derruba a chave para 43 dígitos.
    - Se não houver chave de 44 dígitos, usar "".
 
 Processo interno antes do JSON final:
@@ -541,6 +554,17 @@ Valor total do documento e Valores de Mercadoria/Bases:
      CSLL "618.12" + IRRF "927.23" (ISS não retido); "Valor Total Líquido" explícito = "58013.52".
      Resultado obrigatório: `valorTotalDocumento` = "58013.52" (nunca "61815.12" nem outro valor).
 
+2b. Regra de Ouro para `valorMercadoria` em NFS-e e NFS-EG: `valorMercadoria` é SEMPRE o valor
+    BRUTO do serviço ("Vl. do Serviço"/"Valor Total do Serviço"/"Valor Total dos Serviços"),
+    mesmo quando `valorTotalDocumento` for o valor líquido pela regra 2 acima. NUNCA copiar o
+    valor líquido de `valorTotalDocumento` para `valorMercadoria` neste caso — a regra 6 abaixo
+    (copiar `valorTotalDocumento` para `valorMercadoria` quando não há "VALOR TOTAL DOS
+    PRODUTOS") NÃO se aplica a NFS-e/NFS-EG. Isso é necessário porque `valorMercadoria` é
+    comparado com o valor cadastrado no pedido de compra, que sempre reflete o valor bruto do
+    serviço, nunca o líquido pós-retenção.
+    - Exemplo: Vl. do Serviço = "550.00"; ISS retido = "23.04"; `valorTotalDocumento` (líquido,
+      regra 2) = "526.96". Resultado obrigatório: `valorMercadoria` = "550.00" (nunca "526.96").
+
 3. Nunca usar como `valorTotalDocumento` um valor que não seja nem o bruto nem o líquido
    explicitamente calculável a partir dos campos do documento (nunca inventar ou aproximar).
 
@@ -556,7 +580,9 @@ Valor total do documento e Valores de Mercadoria/Bases:
    `valorMercadoria` (bruto) pode ser diferente de `valorTotalDocumento` (líquido).
 
 6. Se o termo "VALOR TOTAL DOS PRODUTOS" não estiver claro ou não existir no documento, atribua o
-   mesmo valor de `valorTotalDocumento` a `valorMercadoria` e às respectivas bases monetárias.
+   mesmo valor de `valorTotalDocumento` a `valorMercadoria` e às respectivas bases monetárias —
+   EXCETO para NFS-e/NFS-EG, onde vale a regra 2b acima (`valorMercadoria` = bruto do serviço,
+   sempre, independentemente de `valorTotalDocumento`).
 
 7. Regra de Ouro para `valorDescontoGeral` em NF-e (DANFE): procurar ativamente, no mesmo bloco de
    totais onde aparece "VALOR TOTAL DOS PRODUTOS", rótulos de desconto como "VALOR DO DESCONTO",

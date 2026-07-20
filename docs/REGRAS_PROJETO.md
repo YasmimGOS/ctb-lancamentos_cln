@@ -404,6 +404,14 @@ chave.
   qualquer outro pedido similar cadastrado ANTES desta correção pode já ter sido lançado com valor
   incorreto - vale uma checagem retroativa nos lançamentos de documentos de serviço feitos entre a
   aplicação da seção 3.9 e desta seção 3.10.
+- **Caso irmão via rejeição NATIVA do Mega (não é a Validação 9 acima, é o handler pré-existente
+  "Valor Unitário"/Origem/Recebimento em `lancamento_controller.py::_lancar`, não construído nesta
+  sessão):** pedido 25997/nota 7853277 (Energisa Tocantins) - Mega rejeitou porque o pedido de
+  compra está cadastrado com R$ 1.836,84 (só a linha "Consumo em kWh"), enquanto a fatura real soma
+  R$ 1.873,10 (Consumo 1.836,84 + Adicional Bandeira Amarela 36,26, confirmado lendo o PDF). Mesma
+  natureza dos outros casos desta seção (cadastro do pedido de compra incompleto/errado no Mega) -
+  bloqueado corretamente, status "PedidoValorUnitarioDivergente", NÃO registrado no BD (reprocessa
+  sozinho após a correção do pedido de compra no Mega). Não exigiu mudança de código.
 
 ---
 
@@ -859,6 +867,200 @@ chave.
 - **Generaliza para qualquer fornecedor futuro** com o mesmo padrão de PDF protegido - basta
   adicionar o termo do nome de arquivo em `ARQUIVOS_PROTEGIDOS_SENHA` e/ou o fornecedor em
   `FANTASIAS_PROVAVEL_SENHA`.
+
+---
+
+### 3.14 PIS/COFINS/CSLL não processados no Mega - causa raiz identificada (cadastro, não código) (17-18/07/2026)
+
+> **Contexto:** paliativo da seção 3.6 existe desde 16/07/2026 por falta de causa raiz conhecida.
+> Nesta investigação, usando um caso real novo (pedido 29587/nota 117347, Starian Sistemas,
+> transação Mega 7918439), a causa raiz foi finalmente identificada - é cadastro no Mega, não é
+> bug do RPA nem do payload enviado.
+
+- **Sintoma:** payload de recebimento enviado corretamente (`valorPIS`, `valorCOFINS`,
+  `percentualPIS`, `percentualCofins` com os valores certos extraídos da NFS-e), Mega aceita o
+  lançamento (sucesso, gera transação), mas na tela "Totais do Documento" do Mega, `Valor do PIS`
+  e `Valor do COFINS` aparecem **0,00** - só CSLL e IRRF aparecem corretos.
+- **Explicação do campo `calculaValores` (confirmada com o time de TI/Mega, Robert Costa, sobre um
+  incidente histórico irmão - pedido 752/nota 19, transação 7886851):** `"calculaValores": "N"`
+  (enviado hoje na raiz e em cada item, herdado do fluxo Power Automate original, nunca revisado)
+  diz ao Mega "a responsabilidade do cálculo é nossa" - no lançamento manual, o Mega aplica regras
+  automáticas próprias que não rodam quando mandamos `"N"`. Testes do time de TI (relançar a mesma
+  nota, trocar a ordem de lançamento, igualar `dataMovimento`) descartaram instabilidade e
+  apontaram para uma configuração de cadastro, não para o `calculaValores` isoladamente.
+- **Causa raiz encontrada (artigos da base de suporte Senior/Mega):** Mega Fiscal → Tributos →
+  **Aplicação do Produto** → código **109** ("Serviços S/ Crédito de PIS-COFINS", usado no item
+  via `dado_pedido["APLICACAO"]`, sem lógica nossa no meio - ver `services/etl_service.py::
+  montar_item` linha ~205) → aba **PIS/COFINS** → o checkbox **"Calcular"** estava **desmarcado**
+  tanto para PIS quanto para COFINS (e Alíquota zerada, embora CST Entrada estivesse preenchido
+  como "70"). Conforme a prioridade de busca de parâmetros do Mega (Aplicação → Regra de PIS/COFINS
+  → Parâmetros Tributários), com "Calcular" desmarcado a Aplicação é desqualificada e, se os níveis
+  seguintes também não tiverem PIS/COFINS configurado, o resultado fica zerado - **independente do
+  que o RPA envie no payload**.
+- **Hipóteses descartadas nesta investigação:**
+  - Aplicação 109 vs 108 ("Serviços C/ Crédito de PIS-COFINS"): descartada - usuário confirmou que
+    todos os lançamentos manuais desse tipo de documento também usam 109, nunca 108, então a
+    aplicação escolhida não é o diferencial.
+  - Agente (fornecedor) não enquadrado no PIS/COFINS: descartada - conferido o cadastro do agente
+    Starian (Empresarial/Global/Cadastros/Agentes → aba Fiscal), 'Enquadrado no PIS' e 'Enquadrado
+    no COFINS' já estavam marcados corretamente.
+- **Correção aplicada (cadastro no Mega, feita pelo usuário, não é mudança de código):** marcado
+  "Calcular" para PIS e COFINS na aplicação 109, com Alíquota PIS = 0,6500% e COFINS = 3,0000%
+  (confirma exatamente os percentuais reais da NFS-e: 22,44/3.452,64 = 0,65% e 103,58/3.452,64 =
+  3,00%) - primeira tentativa do usuário tinha os dois percentuais invertidos, corrigido antes de
+  confirmar.
+- **Validação parcial:** após a correção, reabrindo "Gerar Parcelas" no documento 117347, a aba
+  Impostos passou a mostrar `Valor do PIS = 22,44` e `Valor do COFINS = 103,58` corretos (prova que
+  o cadastro da aplicação estava mesmo zerando o cálculo). Porém "Totais do Documento" (tela
+  principal) continuou mostrando PIS/COFINS = 0,00 mesmo depois da correção - hipótese em aberto é
+  que a aba "Gerar Parcelas" seja só uma prévia/simulação (a própria tela avisa isso) e só grave de
+  fato após clicar "Confirmar" nesse popup - **não confirmado se isso resolve o Totais do
+  Documento**, fica pendente.
+- **Efeito colateral notado, não resolvido:** depois da correção da aplicação, ao regenerar
+  parcelas para o documento 117347, o "Valor da Parcela" mostrado (3.292,09) ficou diferente do
+  valor de mercadoria (3.452,64) e do `valorParcela` originalmente enviado (3.452,64) - a diferença
+  bate exatamente com o CSLL (160,55), sugerindo possível desconto duplicado de CSLL ao gerar
+  parcelas com a aplicação corrigida. **Não investigado a fundo, fica como possível problema novo
+  a observar em próximos testes.**
+- **Pendente:**
+  - Confirmar se "Totais do Documento" atualiza corretamente após confirmar a geração de parcelas
+    (ou se precisa relançar/refazer a entrada, como avisa a KB da Senior).
+  - Investigar o possível desconto duplicado de CSLL no "Valor da Parcela" após a correção da
+    aplicação 109.
+  - Reavaliar o paliativo da seção 3.6 (`BLOQUEIO_PIS_COFINS_ATIVO`) só depois de confirmar os dois
+    pontos acima em mais de um pedido - a aplicação 109 é usada por vários fornecedores, então a
+    correção vale para todos eles, mas precisa de mais testes antes de destravar o bloqueio geral.
+  - Fonte adicional consultada, ainda sem conclusão aplicada: artigo Senior sobre "CST de PIS e
+    COFINS incorreto" (causa alternativa: agente não enquadrado - descartada para Starian, mas
+    pode valer conferir para outros fornecedores que apresentem o mesmo sintoma).
+
+### 3.15 issRetido incorreto por confusão com campo de bloco diferente - CORRIGIDO e CONFIRMADO (20/07/2026)
+
+> **CONFIRMADO EM PRODUÇÃO.** Pedido 320970/nota 988 (Brazfort Brazil Locações, fornecedor
+> "RAPIDO ARAGUAIA", NFS-e Goiânia) reprocessado após a correção do prompt e o usuário confirmou:
+> "Deu certo, está tudo ok".
+
+- **Sintoma:** documento com **"ISS a reter: 1 - Sim"** e **"(-) ISS Retido: 23,04"** impressos
+  explicitamente na NF. Extração primária (1ª IA) leu corretamente `totalISS`/`baseISS`/
+  `percentualISS` (23.04/550.00/4.19), mas a 2ª chamada (extra, autoritativa para `issRetido`)
+  devolveu `issRetido: false` - e pela regra de precedência, isso zerou todo o bloco de ISS no
+  payload final, apesar da retenção ser real e explícita no documento.
+- **Causa:** não era falta de regra no prompt - a regra 14 de `prompts/prompt_2a_ia.txt` já cobria
+  exatamente o padrão "ISS a Reter: 1 - Sim" (código ABRASF). A IA se confundiu com um campo
+  **vizinho e de bloco diferente**: "(=) Valor ISS: 0,00", dentro do bloco "Cálculo do ISSQN devido
+  no Município" - esse campo representa o ISS que o PRÓPRIO PRESTADOR ainda deveria pagar
+  diretamente (zero justamente porque a retenção pelo tomador já cobre a obrigação), não indica
+  ausência de retenção.
+- **Correção aplicada:** adicionado um terceiro exemplo real completo em `prompts/prompt_2a_ia.txt`
+  (após os dois exemplos existentes de `issRetido: true`), reproduzindo exatamente esse layout de
+  3 blocos e a armadilha do "Valor ISS: 0,00" vizinho ao "ISS a reter: 1 - Sim", com números reais
+  desta nota (23,04 / 550,00 / 4,19).
+- **Testado e confirmado em produção:** usuário reprocessou o pedido 320970/nota 988 com o prompt
+  corrigido e confirmou resultado correto.
+- **Pendência URGENTE (não relacionada ao prompt, é sobre o lançamento já feito):** a transação
+  Mega **7944898** (pedido 320970/nota 988), lançada ANTES desta correção, saiu com ISS zerado
+  (`totalISS`/`valorISS` = 0,00 em vez de 23,04) - precisa correção manual no Mega. Soma-se à lista
+  de pendências de correção manual já existente (transação 7907369/pedido 320868, seção 3.10;
+  transação 7909499/pedido 25998, seção 3.12).
+
+---
+
+### 3.16 Chave de Acesso com dígito verificador inválido - IA funde grupo de 4 dígitos parecido com o vizinho - CORRIGIDO e CONFIRMADO em produção (20/07/2026)
+
+> **Gatilho:** falha real em produção. Pedido 320983/nota 307 (fornecedor "R P A CUNHA & CIA
+> LTDA - ME - ORTOMED", CNPJ 07071977000149, filial 3/Rápido Araguaia) rejeitado pelo Mega:
+> `Erro na rotina [adm_pck_nfe.F_ValidaChaveNFE] - ORA-20001: Chave de Acesso não encontrada`.
+
+- **Sintoma:** as duas chamadas de IA (1ª e extra) leram a chave de acesso do DANFE com apenas
+  **40 dígitos** cada (deveriam ser 44), e nem batiam entre si. A regra de consolidação antiga em
+  `services/etl_service.py` só validava `len(chave) == 44`, então ambas foram descartadas e
+  `chaveAcesso` foi enviada como `""` ao Mega - que rejeitou com um erro Oracle genérico, sem
+  indicar que o problema era leitura de IA.
+- **Causa raiz confirmada:** a chave impressa no documento é `5226 0707 0719 7700 0149 5500 1000
+  0003 0718 9013 1292` (44 dígitos, DV módulo 11 confere). O texto está nítido - não é problema de
+  resolução de imagem. As duas chamadas de IA "pularam" o grupo `0707` (ou o fundiram com o grupo
+  vizinho `0719`, visualmente parecido), resultando em 40 dígitos em vez de 44. Ou seja: não é
+  "baixa qualidade de PDF" no sentido de imagem ilegível, é a IA confundindo dois grupos de 4
+  dígitos consecutivos e parecidos e descartando um deles.
+- **Correções aplicadas (duas camadas, complementares):**
+  1. **Prompt** (`prompts/prompt_1a_ia.txt` item 4 e `prompts/prompt_2a_ia.txt` item 6-7 da seção
+     "Extração de chaveAcesso"): instrução explícita para ler a chave em 11 grupos de 4 dígitos,
+     contar os grupos, e não pular/fundir grupos vizinhos parecidos (com o exemplo real
+     "0707"/"0719" desta nota).
+  2. **Código** (`utils/validators.py::chave_acesso_valida`): validação de chave de acesso passou
+     a calcular o dígito verificador (módulo 11, mesmo algoritmo da SEFAZ) sobre os 43 primeiros
+     dígitos, não só checar o tamanho. Isso pega tanto chave com menos/mais de 44 dígitos quanto
+     chave com exatamente 44 dígitos mas conteúdo errado (dígito trocado), caso que a checagem
+     antiga deixava passar silenciosamente. Usada na consolidação (`services/etl_service.py`) e em
+     uma nova blocagem no controller.
+  3. **Nova Validação 5B** em `controllers/lancamento_controller.py` (entre a Validação 5 - Data do
+     Documento - e a Validação 6 - Condição de Pagamento): para tipos de documento que exigem chave
+     (`NF-E`, `NFSC`, `NFSTE`, `NF3E`), se a chave final não passar em `chave_acesso_valida`, o
+     lançamento é bloqueado (`deve_lancar = False`, status `ChaveAcessoInvalida`) **antes** de
+     chegar ao Mega, com aviso no Teams mostrando as duas leituras brutas de IA (`chave_primaria_raw`
+     / `chave_extra_raw`) para conferência manual - troca o erro Oracle genérico por um aviso claro
+     e específico.
+- **Efeito esperado:** para documentos onde a IA lê a chave certa, nada muda (segue lançando
+  normal). Para documentos onde a IA erra a chave (como este), o pedido passa a ser bloqueado com
+  aviso claro em vez de ir para o Mega e falhar lá com erro Oracle opaco. A melhoria do prompt deve
+  reduzir a frequência desse tipo de erro de leitura, mas não elimina 100% - por isso a blocagem no
+  código é a rede de segurança definitiva.
+- **CONFIRMADO EM PRODUÇÃO (mesmo dia, disparo `lancamentoCLN_20260720_113108`):** a Validação 5B
+  entrou em ação e bloqueou corretamente MAIS DOIS documentos com chave de acesso inválida, antes
+  de chegarem ao Mega:
+  - Pedido 320996/nota 4815 (COMERCIAL POLLYANNA): as duas leituras de IA trouxeram caracteres
+    não numéricos (`52260737d3b9...` e `52260737d3f0...`) - reprovadas até pela checagem de
+    tamanho/dígitos, nem chegou a testar o DV. Conferida a chave real direto na imagem do DANFE
+    (nítida): `5226 0737 4030 7800 0248 5500 2000 0048 1513 9928 2163` -> DV módulo 11 confere.
+    **Chave correta para lançamento manual: `52260737403078000248550020000048151399282163`.**
+  - Pedido 320908/nota 2354 (KNOV): as duas leituras de IA (`...8134...`/`...8313...`) tinham 44
+    dígitos numéricos válidos mas o DV não conferiu em nenhuma das duas. Chave real conferida na
+    imagem do DANFE: `3526 0726 8813 5400 0186 5500 1000 0023 5412 3797 2872` -> DV módulo 11
+    confere. **Chave correta para lançamento manual: `35260726881354000186550010000023541237972872`.**
+  - Nos dois casos a imagem do DANFE está nítida (mesmo padrão do pedido 320983) - confirma que o
+    problema é a IA errar dígitos específicos de grupos do meio da chave, não resolução de imagem
+    baixa. A blocagem por DV funcionou exatamente como esperado: nenhuma chave errada foi enviada
+    ao Mega: os dois pedidos ficaram com status `ChaveAcessoInvalida` e aviso claro no Teams com
+    as duas leituras brutas, em vez do erro Oracle genérico.
+  - **Ação pendente:** lançamento manual no Mega dos pedidos 320996/nota 4815 e 320908/nota 2354
+    usando as chaves corretas acima.
+- **Pendência em aberto:** o pedido 320983/nota 307 (caso original desta seção) ainda não foi
+  reprocessado neste disparo para confirmar se o ajuste de prompt já lê a chave certa de primeira.
+
+---
+
+### 3.17 issRetido incorreto (falso positivo) por confundir "VALOR DO ISSQN" com "VALOR DO ISSQN RETIDO" em tabela de 5 colunas - CORRIGIDO, aguardando confirmação em produção (20/07/2026)
+
+> **Espelho invertido da seção 3.15.** Lá a 2ª IA disse `issRetido: false` quando era retido
+> (falso negativo). Aqui a 2ª IA disse `issRetido: true` quando NÃO era retido (falso positivo) -
+> mesma classe de bug (confundir dois campos de ISSQN vizinhos/parecidos), erro na direção oposta.
+
+- **Sintoma:** pedido 5841/nota 1457 (prestador Sgm Comunicacao Visual Ltda, CNPJ
+  50.157.646/0001-55, NFS-e de Aparecida de Goiânia, tomador Condomínio Shopping Center Cerrado)
+  lançado no Mega (transação **7948918**) com `issRetido: true` e `valorISSRetido: 99.22`,
+  zerando a base tributável do prestador incorretamente.
+- **Causa raiz confirmada** (PDF `1457-nfse.pdf` conferido via extração de texto): a nota tem uma
+  única linha de tabela com 5 colunas lado a lado: `TOTAL LÍQUIDO DA NOTA (R$)` | `BASE DE CÁLCULO
+  ISSQN (R$)` | `ALÍQUOTA ISSQN (%)` | `VALOR DO ISSQN (R$)` | `VALOR DO ISSQN RETIDO (R$)`, com os
+  valores `2.250,00 | 2.250,00 | 4,41 | 99,22 | 0,00` na linha de baixo. O documento já diz
+  explicitamente que a retenção é **0,00** (última coluna) - a IA pegou o valor da penúltima coluna
+  (`VALOR DO ISSQN`, 99,22 - é o ISS apurado/devido pelo prestador, não retido) e tratou como se
+  fosse a última (`VALOR DO ISSQN RETIDO`). É o mesmo padrão da seção 3.15 (campos de nomes muito
+  parecidos, lado a lado, um deles "vence" errado), mas agora em formato de tabela de colunas em
+  vez de blocos separados.
+- **Correção aplicada:** adicionado um quarto exemplo real completo em `prompts/prompt_2a_ia.txt`
+  (logo antes de "Motivo operacional desta regra"), reproduzindo esse layout de 5 colunas com os
+  números reais desta nota, instruindo a IA a contar cabeçalhos e valores na mesma ordem da
+  esquerda pra direita e usar exclusivamente o ÚLTIMO valor da linha (sob "VALOR DO ISSQN RETIDO")
+  para decidir `issRetido`/`valorISSRetido`, nunca o penúltimo ("VALOR DO ISSQN").
+- **Pendência URGENTE (não relacionada ao prompt, é sobre o lançamento já feito):** a transação
+  Mega **7948918** (pedido 5841/nota 1457), lançada ANTES desta correção, saiu com ISS incorreto
+  (`totalISS`/`valorISS` = 99,22 em vez de 0,00) - precisa correção manual no Mega. Soma-se à lista
+  de pendências de correção manual já existente (transação 7907369/pedido 320868, seção 3.10;
+  transação 7909499/pedido 25998, seção 3.12; transação 7944898/pedido 320970, seção 3.15).
+- **Pendência de confirmação:** aguardando reprocessamento de uma nota com o mesmo layout (5
+  colunas, Aparecida de Goiânia ou prestador equivalente) para confirmar que o ajuste de prompt
+  corrige o resultado, seguindo o mesmo padrão de confirmação usado na 3.15.
 
 ---
 

@@ -47,13 +47,19 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     else:
         ia["numNota"] = sanit_primaria
 
-    # Consolidar chave de acesso: priorizar extração extra se tiver 44 dígitos
+    # Consolidar chave de acesso: priorizar extração extra se passar na validação completa
+    # (44 dígitos + dígito verificador módulo 11 - ver docs\REGRAS_PROJETO.md secao 3.16).
+    # Checar só o tamanho (== 44) não pega o caso em que a IA lê 44 dígitos mas troca/funde um
+    # grupo de 4 dígitos parecido com o vizinho (ex.: "0707" seguido de "0719" na mesma chave) -
+    # o DV pega isso porque o resultado deixa de bater com o checksum oficial da SEFAZ.
     chave_primaria = str(ia.get("chaveAcesso", "")).strip()
     chave_extra = str(extra.get("chaveAcesso", "")).strip()
-    if len(chave_extra) == 44 and chave_extra.isdigit():
+    if val.chave_acesso_valida(chave_extra):
         ia["chaveAcesso"] = chave_extra
-    elif len(chave_primaria) != 44 or not chave_primaria.isdigit():
-        # Se nenhuma das duas tem 44 dígitos, limpar para evitar erro
+    elif not val.chave_acesso_valida(chave_primaria):
+        # Se nenhuma das duas passa a validação (tamanho + DV), limpar para evitar enviar chave
+        # incorreta ao Mega - o bloqueio explícito fica a cargo da Validação de chave de acesso
+        # no controller (evita o erro genérico do Oracle: adm_pck_nfe.F_ValidaChaveNFE).
         ia["chaveAcesso"] = ""
 
     ia = br.aplicar_iss_do_valor_retido(ia, extra)
@@ -77,6 +83,9 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     ia = br.calcular_percentuais_por_valor_e_base(ia)
     tipo_doc = br.resolver_tipo_doc_por_emitente(ia.get("tipoDocFiscal", ""), cnpj_emitente)
     ia["tipoDocFiscal"] = tipo_doc
+    # totalISSDevido sempre espelha totalISS (Power Automate: coalesce(totalISS, '0.00')) -
+    # calculado por ultimo para refletir todos os ajustes de ISS acima (retido, corrigido, zerado).
+    ia["totalISSDevido"] = ia.get("totalISS", "0.00") or "0.00"
     return ia, cnpj_emitente, cnpj_tomador, tipo_doc
 
 
@@ -212,9 +221,9 @@ def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
         "baseISS": base_fmt,
         "percentualISS": perc_ou_calc("valorISS", "percentualISS", base_fiscal_dec),
         "valorISS": valor_iss,
-        "baseISSDevido": str(ia.get("baseISSDevido", "0.00")),
-        "percentualISSDevido": str(ia.get("percentualISSDevido", "0.00")),
-        "valorISSDevido": str(ia.get("valorISSDevido", "0.00")),
+        "baseISSDevido": base_fmt,
+        "percentualISSDevido": perc_ou_calc("valorISS", "percentualISS", base_fiscal_dec),
+        "valorISSDevido": valor_iss,
         "baseIRFF": base_fmt,
         "percentualIRFF": perc_irff,
         "valorIRFF": valor_irff,

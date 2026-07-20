@@ -68,3 +68,23 @@ def mesma_raiz(cnpj_a: str, cnpj_b: str) -> bool:
 def tamanho_valido(doc: str) -> bool:
     d = somente_digitos(doc)
     return len(d) in (11, 14)
+
+
+def chave_acesso_valida(chave: object) -> bool:
+    """Valida chave de acesso de NF-e/NFC-e/CT-e/NFS-e: 44 dígitos numéricos + dígito
+    verificador (módulo 11, mesmo algoritmo usado pela SEFAZ) sobre os 43 primeiros dígitos.
+
+    Uma leitura de IA pode ter exatamente 44 dígitos e ainda estar errada (dígitos trocados
+    ou um grupo de 4 dígitos substituído por outro parecido) - o dígito verificador pega esse
+    caso, que a checagem antiga (só tamanho == 44) deixava passar.
+    """
+    s = somente_digitos(chave)
+    if len(s) != 44:
+        return False
+    pesos = [2, 3, 4, 5, 6, 7, 8, 9]
+    total = 0
+    for i, c in enumerate(reversed(s[:43])):
+        total += int(c) * pesos[i % 8]
+    resto = total % 11
+    dv_calculado = 0 if resto in (0, 1) else 11 - resto
+    return dv_calculado == int(s[43])

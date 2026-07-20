@@ -91,6 +91,7 @@ class LancamentoController:
         agente = pedido.get("AGN_IN_CODIGO")
         organizacao = pedido.get("ORG_IN_CODIGO")
         fantasia = pedido.get("AGN_ST_FANTASIA", "")
+        nome_filial_pedido = pedido.get("FIL_ST_FANTASIA", "")
         cond_pagto = pedido.get("COND_ST_CODIGO", "")
 
         # Criar identificador completo para registro no BD: ORG-PDC-AGN
@@ -452,6 +453,10 @@ class LancamentoController:
                 "cond_pagto": payload.get("condPagto", ""),
                 "data_vencimento": ia_final.get("dataVencimento", ""),
                 "almoxarifado": ia_final.get("almoxarifado", ""),
+                # Guardados só para diagnostico/Teams da Validação 5B (Chave de Acesso) - não vão
+                # para o payload do Mega.
+                "chave_primaria_raw": str(ia_raw.get("chaveAcesso", "")).strip(),
+                "chave_extra_raw": str(extra_raw.get("chaveAcesso", "")).strip(),
             }
             # Adicionar contexto ao payload para recuperação posterior
             payload["_contexto"] = contexto_payload
@@ -528,7 +533,8 @@ class LancamentoController:
         resultados = [
             self._validar_e_lancar_payload(payload, pdc, filial, cnpj_forn, cnpj_filial, num_pedido_bd,
                                            data_vencimento_boleto, boletos, fantasia,
-                                           cnpjs_emitente_pedido, tomador_candidatos_pedido)
+                                           cnpjs_emitente_pedido, tomador_candidatos_pedido,
+                                           nome_filial_pedido)
             for payload in payloads_para_lancar
         ]
         return resultados
@@ -537,7 +543,8 @@ class LancamentoController:
                                    cnpj_filial: str, num_pedido_bd: str,
                                    data_vencimento_boleto: str = "", boletos: list[dict] | None = None,
                                    fantasia_pedido: str = "", cnpjs_emitente_pedido: list[str] | None = None,
-                                   tomador_candidatos_pedido: list[tuple[str, str]] | None = None) -> ResultadoPedido:
+                                   tomador_candidatos_pedido: list[tuple[str, str]] | None = None,
+                                   nome_filial_pedido: str = "") -> ResultadoPedido:
         res = ResultadoPedido(pedido=pdc, filial=filial)
         contexto = payload.get("_contexto", {})
         log.info(sanitize_emoji("  ✓ Payload selecionado: tipoDocFiscal=%s"), payload.get("tipoDocFiscal", ""))
@@ -647,9 +654,10 @@ class LancamentoController:
         log.info("  │  ├─ CNPJ Documento: %s", contexto["cnpj_tomador"])
         log.info("  │  ├─ Nome Tomador: %s", contexto["nome_tomador"])
         log.info("  │  └─ CNPJ Esperado: %s", cnpj_filial)
-        tomador_ok = br.valida_tomador_x_filial(contexto["cnpj_tomador"], contexto["nome_tomador"], filial, cnpj_filial)
+        tomador_ok = br.valida_tomador_x_filial(contexto["cnpj_tomador"], contexto["nome_tomador"], filial, cnpj_filial,
+                                                 nome_filial_pedido)
         candidatos_tomador = tomador_candidatos_pedido or [(contexto["cnpj_tomador"], contexto["nome_tomador"])]
-        if not tomador_ok and br.valida_tomador_x_filial_multi(candidatos_tomador, filial, cnpj_filial):
+        if not tomador_ok and br.valida_tomador_x_filial_multi(candidatos_tomador, filial, cnpj_filial, nome_filial_pedido):
             log.info(sanitize_emoji("  │  ℹ️  CNPJ do documento selecionado divergente, mas outro anexo do pedido confirma a filial"))
             tomador_ok = True
         if not tomador_ok:
@@ -684,6 +692,29 @@ class LancamentoController:
             log.info("  └─ Status final: %s (registrado no BD)", res.status)
             return res
         log.info(sanitize_emoji("  │  ✓ Data do documento válida"))
+
+        # Validação 5B: Chave de Acesso válida (ver docs\REGRAS_PROJETO.md secao 3.16).
+        # Mega valida a chave de acesso na rotina adm_pck_nfe.F_ValidaChaveNFE - se enviarmos ""
+        # ou uma chave com dígito verificador incorreto, o pedido é rejeitado lá com um erro
+        # Oracle genérico ("Chave de Acesso não encontrada"). Bloqueamos antes, com contexto
+        # claro para conferência manual, para os tipos de documento que exigem chave.
+        tipos_com_chave = ("NF-E", "NFSC", "NFSTE", "NF3E")
+        if contexto["tipo_doc"] in tipos_com_chave and not val.chave_acesso_valida(payload.get("chaveAcesso", "")):
+            log.warning(sanitize_emoji("  │  ⚠️  Chave de acesso ausente ou inválida - bloqueio ativado"))
+            msg = "Chave de acesso não pôde ser lida/validada automaticamente - requer conferência manual"
+            detalhes = {
+                "Nota Fiscal": payload.get("numNota", ""),
+                "Chave lida (extração principal)": contexto.get("chave_primaria_raw", "") or "(vazia)",
+                "Chave lida (extração extra)": contexto.get("chave_extra_raw", "") or "(vazia)",
+            }
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                erro="Motivo: Chave de acesso ausente ou com digito verificador invalido")
+            res.deve_lancar = False
+            res.status = "ChaveAcessoInvalida"
+            log.info("  └─ Status final: %s (registrado no BD)", res.status)
+            return res
+        log.info(sanitize_emoji("  │  ✓ Chave de acesso válida (ou não exigida para este tipo de documento)"))
 
         # Validação: Condição de Pagamento ≤ 7 dias
         log.info("  ├─ Validação 6: Condição de Pagamento ≤ 7 dias...")
@@ -872,11 +903,14 @@ class LancamentoController:
         if status_code == 400 and "Total da Fatura" in erros and "Soma dos Valores das Parcelas" in erros:
             log.warning(sanitize_emoji("  ⚠️  Valor do pedido de compra não confere com a Nota Fiscal"))
             msg = "Valor cadastrado no pedido de compra não confere com a Nota Fiscal - requer correção manual do pedido no Mega"
+            # "Parcelas[X]" = Soma dos Valores das Parcelas = valorParcela, montado a partir do
+            # pedido de compra (soma); "Fatura[Y]" = Total da Fatura = totalNota, o valor real do
+            # documento/NF. Ou seja: group(1) = pedido de compra, group(2) = nota fiscal.
             match = re.search(r"Parcelas\[([\d.,]+)\].*Fatura\[([\d.,]+)\]", erros)
             detalhes = {
                 "Nota Fiscal": num_nota,
-                "Valor da Nota Fiscal (bruto)": match.group(1) if match else "",
-                "Valor cadastrado no pedido de compra": match.group(2) if match else "",
+                "Valor da Nota Fiscal (bruto)": match.group(2) if match else "",
+                "Valor cadastrado no pedido de compra": match.group(1) if match else "",
             }
             self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
             self.bpms.registrar(self.id_disparo, "Falha", num_pedido_bd, erro=erros)
