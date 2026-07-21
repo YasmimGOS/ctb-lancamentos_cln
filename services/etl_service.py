@@ -89,6 +89,27 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     return ia, cnpj_emitente, cnpj_tomador, tipo_doc
 
 
+def agregar_transacoes_rota_verde(resultados_ia: list[dict]) -> dict:
+    """Agrega várias extrações de IA (uma por comprovante de transação) num único ia_final
+    sintético: soma valorTotalDocumento/valorMercadoria de todas as transações e usa a data mais
+    antiga como dataDocumento. Usado só para o fornecedor Rota Verde (ver
+    services/business_rules.py::eh_fornecedor_rota_verde) - não há NF de verdade, o "documento"
+    lançado é a soma dos comprovantes do período."""
+    soma = sum(fmt.to_float(r.get("valorTotalDocumento", "0")) for r in resultados_ia)
+    data_final = br.data_documento_mais_antiga([str(r.get("dataDocumento", "")) for r in resultados_ia])
+    valor_fmt = fmt.format_number(soma)
+    return {
+        "tipoDocFiscal": "RECIBO",
+        "numNota": "",
+        "serie": "",
+        "dataDocumento": data_final,
+        "dataVencimento": "",
+        "chaveAcesso": "",
+        "valorTotalDocumento": valor_fmt,
+        "valorMercadoria": valor_fmt,
+    }
+
+
 def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
                 total_nota: str, is_servico: bool, multi_item: bool,
                 is_equatorial: bool = False) -> tuple[dict, float]:

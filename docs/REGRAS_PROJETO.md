@@ -1064,6 +1064,65 @@ chave.
 
 ---
 
+### 3.18 issRetido incorreto (falso negativo) por tabela de tributos em duas linhas de 7 colunas - CORRIGIDO, aguardando confirmação em produção (20/07/2026)
+
+> **Mesma classe de bug das seções 3.15/3.17** (campos de ISSQN vizinhos/parecidos confundindo a
+> leitura), agora num layout novo: tabela de tributos partida em DUAS linhas, cada uma com 7
+> colunas.
+
+- **Sintoma:** pedido 5875/nota 1063 (prestador Digital Midia Ltda, CNPJ 35.727.978/0001-34, NFS-e
+  de Goiânia, tomador Condomínio Shopping Center Cerrado) lançado no Mega (transação **7963399**)
+  com `issRetido: false` e ISS zerado, apesar do documento indicar retenção.
+- **Causa raiz confirmada** (PDF `nf 1063 - espaço pekids.pdf` conferido): a seção "Detalhamento dos
+  Tributos" vem em duas linhas de 7 colunas cada. Linha 1: `Vl. Total dos Serviços | Desconto
+  Incondicionado | Deduções Base Cálculo | Base de Cálculo | Total do ISSQN | ISSQN Retido |
+  Desconto Condicionado` = `1.045,00 | 0,00 | 0,00 | 1.045,00 | 0,00 | Sim | 0,00`. Linha 2: `PIS |
+  COFINS | INSS | IRRF | CSLL | Outras Retenções | Vl. ISSQN Retido | Vl. Líquido da Nota Fiscal` =
+  `0,00 | 0,00 | 0,00 | 0,00 | 0,00 | 0,00 | 20,90 | 1.024,10`. O documento diz explicitamente
+  "ISSQN Retido: Sim" (linha 1, coluna 6) e "Vl. ISSQN Retido: R$ 20,90" (linha 2, coluna 7) - a IA
+  ignorou os dois e usou o "Total do ISSQN: R$ 0,00" (linha 1, coluna 5) para concluir, errado, que
+  não havia retenção.
+- **Correção aplicada:** adicionado um quinto exemplo real completo em `prompts/prompt_2a_ia.txt`
+  (logo antes de "Motivo operacional desta regra"), reproduzindo esse layout de duas linhas/7
+  colunas com os números reais desta nota, instruindo a IA a tratar as duas linhas como pertencentes
+  à mesma seção de tributos e a nunca deixar o "Total do ISSQN" de uma linha sobrepor o "Sim"/valor
+  positivo de retenção presente na mesma seção.
+- **Pendência URGENTE (não relacionada ao prompt, é sobre o lançamento já feito):** a transação
+  Mega **7963399** (pedido 5875/nota 1063), lançada ANTES desta correção, saiu com ISS zerado
+  (`totalISS`/`valorISS` = 0,00 em vez de 20,90) - precisa correção manual no Mega. Soma-se à lista
+  de pendências de correção manual já existente (transação 7907369/pedido 320868, seção 3.10;
+  transação 7909499/pedido 25998, seção 3.12; transação 7944898/pedido 320970, seção 3.15;
+  transação 7948918/pedido 5841, seção 3.17).
+- **Pendência de confirmação:** aguardando reprocessamento de uma nota com o mesmo layout (duas
+  linhas de 7 colunas, portal issnetonline.com.br/goiania) para confirmar que o ajuste de prompt
+  corrige o resultado, seguindo o mesmo padrão de confirmação usado na 3.15/3.17.
+
+---
+
+### 3.19 Bloqueio indevido na Validação 7 (Cond.Pagto x Boleto) por zero à esquerda - CORRIGIDO, aguardando confirmação em produção (21/07/2026)
+
+- **Sintoma:** pedido 5873 (fornecedor Inovar Marketing Promocional Ltda, cond. pagamento
+  cadastrada "8D") bloqueado pela Validação 7 com o motivo "Condição de pagamento divergente
+  (cadastrada=8D, calculada=08D)", apesar de "8D" e "08D" serem exatamente a mesma condição (8
+  dias). Status final registrado no BD: `CondPagtoDivergente`, sem lançamento no Mega.
+- **Causa raiz confirmada:** `services/business_rules.py::valida_cond_pagto_por_vencimento`
+  comparava `esperada == cond_norm` como STRING pura. `calcular_cond_pagto_por_vencimento` sempre
+  formata com zero à esquerda (`f"{dias:02d}D"`, ex.: "08D"), enquanto `cond_norm` preserva o
+  formato exato cadastrado no pedido (ex.: "8D", sem zero à esquerda). Para qualquer condição de
+  pagamento de 1 a 9 dias sem zero à esquerda no cadastro, a comparação de string sempre falhava
+  mesmo quando a quantidade de dias era idêntica, bloqueando o lançamento indevidamente.
+- **Correção aplicada:** a comparação passou a usar `quantidade_cond_pagto(esperada) ==
+  quantidade_cond_pagto(cond_norm)` (compara a quantidade de dias como inteiro, não a string
+  formatada), eliminando a sensibilidade a zero à esquerda. Testado localmente:
+  `quantidade_cond_pagto("8D") == quantidade_cond_pagto("08D")` -> `8 == 8` -> `True`.
+- **Pendência de confirmação:** aguardando reprocessamento do pedido 5873 (ou outro pedido com
+  cond. pagamento de 1 dígito sem zero à esquerda) para confirmar que a Validação 7 passa a aceitar
+  corretamente, seguindo o mesmo padrão de confirmação usado nas seções 3.15/3.17.
+- **Nota:** este pedido especificamente NÃO tem lançamento incorreto a corrigir no Mega - ele foi
+  apenas bloqueado (status `CondPagtoDivergente`), não lançado com dado errado. Basta reprocessar.
+
+---
+
 ## 4. Integracao IA (Claude)
 
 ### 4.1 Fluxo Assincrono

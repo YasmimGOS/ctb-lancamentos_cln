@@ -296,6 +296,36 @@ só use o valor que está exatamente sob o cabeçalho "VALOR DO ISSQN RETIDO" (o
 nunca o penúltimo) para decidir `issRetido`/`valorISSRetido`. Se esse último valor for "0,00",
 `issRetido` é false mesmo que o "VALOR DO ISSQN" (penúltima coluna) seja maior que zero.
 
+Quinto caso típico que deve retornar true (tabela de tributos em DUAS linhas de 7 colunas cada,
+ARMADILHA CONHECIDA - caso real NFS-e de Goiânia, portal issnetonline.com.br/goiania, pedido
+5875/nota 1063, 20/07/2026):
+Se o documento apresentar a seção "Detalhamento dos Tributos" em duas linhas de cabeçalhos/valores,
+por exemplo:
+- Linha 1 (7 colunas): Vl. Total dos Serviços | Desconto Incondicionado | Deduções Base Cálculo |
+  Base de Cálculo | Total do ISSQN | ISSQN Retido | Desconto Condicionado
+  1.045,00 | 0,00 | 0,00 | 1.045,00 | 0,00 | Sim | 0,00
+- Linha 2 (7 colunas): PIS | COFINS | INSS | IRRF | CSLL | Outras Retenções | Vl. ISSQN Retido |
+  Vl. Líquido da Nota Fiscal
+  0,00 | 0,00 | 0,00 | 0,00 | 0,00 | 0,00 | 20,90 | 1.024,10
+Então o JSON obrigatório é:
+{
+  "chaveAcesso": "",
+  "issRetido": true,
+  "valorISSRetido": "20.90",
+  "cnpjCpfTomador": "",
+  "numNota": "1063"
+}
+ARMADILHA: o flag textual "ISSQN Retido" (coluna 6 da linha 1) e o valor monetário "Vl. ISSQN
+Retido" (coluna 7 da linha 2) NÃO ficam na mesma linha nem lado a lado - estão em linhas diferentes
+da mesma seção "Detalhamento dos Tributos", cada uma com 7 colunas próprias. É fácil ler só a
+linha 1 (que mostra "Total do ISSQN: 0,00" na coluna 5, bem perto do "Sim" da coluna 6) e concluir
+erradamente que não há retenção, ignorando tanto o "Sim" da própria linha 1 quanto o "20,90" da
+linha 2. Trate as duas linhas como pertencentes à MESMA seção de tributos: se a coluna "ISSQN
+Retido" da linha 1 disser "Sim", ou se a coluna "Vl. ISSQN Retido" da linha 2 tiver valor maior que
+zero, `issRetido` é obrigatoriamente true e `valorISSRetido` recebe o valor da linha 2 - mesmo que
+"Total do ISSQN" (linha 1) seja "0,00". Foi exatamente essa confusão que causou o lançamento
+incorreto do pedido 5875/nota 1063 com `issRetido: false` e ISS zerado.
+
 Motivo operacional desta regra:
 Em NFS-e, é comum existir ISS/ISSQN calculado ou apurado na nota, com base, alíquota e valor. Isso
 não significa que o imposto foi retido. A retenção só existe quando o documento informa

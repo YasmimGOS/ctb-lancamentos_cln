@@ -34,15 +34,18 @@ class IaService:
     def __init__(self, settings=None):
         self.s = settings or get_settings()
 
-    def _extrair(self, base64_pdf: str, prompt: str) -> dict:
+    def _extrair(self, conteudo_base64: str, prompt: str, model_tier: str = "medio",
+                 eh_imagem: bool = False) -> dict:
         headers = {"X-API-Key": self.s.ia_api_key}
-        corpo = {"base64_pdf": base64_pdf, "prompt": prompt}
+        campo_conteudo = "base64_image" if eh_imagem else "base64_pdf"
+        corpo = {campo_conteudo: conteudo_base64, "prompt": prompt, "model_tier": model_tier}
         if self.s.ia_model:
             corpo["model"] = self.s.ia_model
         if self.s.ia_max_tokens:
             corpo["max_tokens"] = self.s.ia_max_tokens
 
-        log.info(sanitize_emoji("📤 Enviando PDF para IA (tamanho: %d caracteres)..."), len(base64_pdf))
+        log.info(sanitize_emoji("📤 Enviando %s para IA (tamanho: %d caracteres, tier: %s)..."),
+                 "imagem" if eh_imagem else "PDF", len(conteudo_base64), model_tier)
         resp = request_json("POST", self.s.ia_submit_url, headers=headers, json_body=corpo,
                             timeout=120, tentativas=3, intervalo_s=30)
         resp.raise_for_status()
@@ -106,14 +109,17 @@ class IaService:
 
         raise TimeoutError(f"Job IA {job_id} nao concluiu apos {tempo_total}s ({self.s.ia_poll_max_tentativas} tentativas)")
 
-    def extrair_primaria(self, base64_pdf: str) -> dict:
-        return self._extrair(base64_pdf, _carregar_prompt(self.PROMPT_PRIMARIA))
+    def extrair_primaria(self, conteudo_base64: str, model_tier: str = "medio", eh_imagem: bool = False) -> dict:
+        return self._extrair(conteudo_base64, _carregar_prompt(self.PROMPT_PRIMARIA),
+                              model_tier=model_tier, eh_imagem=eh_imagem)
 
-    def extrair_extra(self, base64_pdf: str) -> dict:
-        return self._extrair(base64_pdf, _carregar_prompt(self.PROMPT_EXTRA))
+    def extrair_extra(self, conteudo_base64: str, model_tier: str = "medio", eh_imagem: bool = False) -> dict:
+        return self._extrair(conteudo_base64, _carregar_prompt(self.PROMPT_EXTRA),
+                              model_tier=model_tier, eh_imagem=eh_imagem)
 
-    def extrair_equatorial(self, base64_pdf: str) -> dict:
+    def extrair_equatorial(self, conteudo_base64: str, model_tier: str = "medio", eh_imagem: bool = False) -> dict:
         """3a chamada, condicional - só para faturas de energia eletrica (fornecedor Equatorial,
         ver services/business_rules.py::eh_fornecedor_equatorial). Extrai os valores individuais
         das secoes FORNECIMENTO e ITENS FINANCEIROS (ver docs/REGRAS_PROJETO.md secao 3.11)."""
-        return self._extrair(base64_pdf, _carregar_prompt(self.PROMPT_EQUATORIAL))
+        return self._extrair(conteudo_base64, _carregar_prompt(self.PROMPT_EQUATORIAL),
+                              model_tier=model_tier, eh_imagem=eh_imagem)

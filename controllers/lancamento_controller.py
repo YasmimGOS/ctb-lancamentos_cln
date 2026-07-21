@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from config import (
     ARQUIVOS_PROTEGIDOS_SENHA, CNPJ_CORRETO_POR_FANTASIA, CNPJ_TOMADOR_CORRETO_POR_FANTASIA,
-    CNPJ_VIBRA_ENERGIA, FANTASIAS_EXECUCAO_MANUAL, FANTASIAS_PROVAVEL_SENHA, get_settings,
+    CNPJ_VIBRA_ENERGIA, FANTASIAS_EXECUCAO_MANUAL, FANTASIAS_MODEL_TIER_ALTO,
+    FANTASIAS_PROVAVEL_SENHA, get_settings,
 )
 from models import ResultadoPedido
 from services import business_rules as br
@@ -74,6 +76,109 @@ class LancamentoController:
                 resultados_por_pedido = list(pool.map(self._processar_seguro, pedidos))
 
         return [r for lote in resultados_por_pedido for r in lote]
+
+    def _extrair_primaria_com_retry(self, base64_pdf: str, model_tier: str = "medio",
+                                     eh_imagem: bool = False, tentativas_extras: int = 3,
+                                     intervalo_s: int = 60) -> dict:
+        """Repete a extração primária (cada tentativa é um job novo na IA, não só nova checagem do
+        mesmo job) quando a NF é documento obrigatório num pedido que também tem boleto anexado -
+        nunca lançar usando só os dados do boleto se a NF falhar (ver pedido 321037: NF falhou na
+        IA e o lançamento saiu com Doc. Fiscal = código do pedido em vez do número da NF)."""
+        ultimo_exc: Exception | None = None
+        for tentativa in range(tentativas_extras + 1):
+            if tentativa > 0:
+                log.warning(sanitize_emoji("  │  ⚠️  Releitura da NF (tentativa %d/%d) - aguardando %ds..."),
+                            tentativa, tentativas_extras, intervalo_s)
+                time.sleep(intervalo_s)
+            try:
+                return self.ia.extrair_primaria(base64_pdf, model_tier=model_tier, eh_imagem=eh_imagem)
+            except Exception as exc:  # noqa: BLE001
+                ultimo_exc = exc
+        raise ultimo_exc
+
+    def _escalar_para_altissimo_se_vazio(self, ia_raw: dict, base64_pdf: str, eh_imagem: bool, nome: str) -> dict:
+        """1 retry único com o tier "altissimo" (o mais caro - reservado a raciocínio pesado) quando
+        a extração primária voltou sem nada de essencial (tipoDocFiscal, numNota e
+        valorTotalDocumento todos vazios). Nunca escolhido por fornecedor, só usado aqui como
+        última tentativa - se também vier vazio ou falhar, segue com o resultado original (o
+        fallback já existente, ex. num_nota_por_pedido, trata o restante)."""
+        if not br.eh_extracao_vazia_criticamente(ia_raw):
+            return ia_raw
+        log.warning(sanitize_emoji("  │  ⚠️  Extração veio vazia (tipoDocFiscal/numNota/valorTotalDocumento em "
+                                    "branco) - tentando 1x com tier altissimo (arquivo: %s)..."), nome)
+        try:
+            ia_raw_altissimo = self.ia.extrair_primaria(base64_pdf, model_tier=br.MODEL_TIER_ALTISSIMO,
+                                                         eh_imagem=eh_imagem)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(sanitize_emoji("  │  ⚠️  Releitura com tier altissimo falhou: %s - seguindo com resultado vazio"), exc)
+            return ia_raw
+        if br.eh_extracao_vazia_criticamente(ia_raw_altissimo):
+            log.warning(sanitize_emoji("  │  ⚠️  Releitura com tier altissimo também veio vazia - seguindo com resultado vazio"))
+            return ia_raw
+        log.info(sanitize_emoji("  │  ✓ Releitura com tier altissimo teve sucesso"))
+        return ia_raw_altissimo
+
+    def _agregar_pagamentos_rota_verde(self, resultados: list[dict], pedido: dict, dados_pedido: list[dict],
+                                        cond_pagto: str, pdc: Any, cnpj_forn: str, cnpj_filial: str,
+                                        model_tier_pedido: str) -> tuple[list[dict], str | None]:
+        """Fornecedor Rota Verde Goias SPE S.A.: cada anexo "Valor" é um comprovante de transação
+        separado (e-mail encaminhado salvo em PDF) - soma o valorTotalDocumento de todos e usa a
+        data mais antiga como dataDocumento (ver services/business_rules.py::eh_fornecedor_rota_verde
+        e services/etl_service.py::agregar_transacoes_rota_verde). Se algum comprovante válido não
+        puder ser lido mesmo após releitura, bloqueia o lançamento inteiro - somar só uma parte dos
+        comprovantes subestimaria o valor da transação."""
+        candidatos = [r for r in resultados if not r["protegido"]]
+        if not candidatos:
+            log.error(sanitize_emoji("  ❌ Nenhum anexo 'Valor' encontrado para o fornecedor Rota Verde"))
+            self.teams.erro_definir_payload(pdc)
+            return [], "SemPayload"
+
+        pendentes = [r for r in candidatos if r["ia_raw"] is None or br.eh_extracao_vazia_criticamente(r["ia_raw"])]
+        if pendentes:
+            log.warning(sanitize_emoji("  ⚠️  %d comprovante(s) Rota Verde ainda não lido(s) com sucesso - "
+                                        "tentando de novo antes de somar..."), len(pendentes))
+            for r in pendentes:
+                try:
+                    ia_raw_retry = self._extrair_primaria_com_retry(r["base64_conteudo"], model_tier=model_tier_pedido,
+                                                                     eh_imagem=r["eh_imagem"])
+                    ia_raw_retry = self._escalar_para_altissimo_se_vazio(ia_raw_retry, r["base64_conteudo"],
+                                                                         r["eh_imagem"], r["nome"])
+                    r["ia_raw"] = ia_raw_retry
+                    log.info(sanitize_emoji("  ├─ ✓ Releitura de %s teve sucesso"), r["nome"])
+                except Exception as exc:  # noqa: BLE001
+                    log.exception(sanitize_emoji("  ├─ ❌ Releitura de %s falhou (pedido %s): %s"), r["nome"], pdc, exc)
+
+        ainda_pendentes = [r for r in candidatos if r["ia_raw"] is None or br.eh_extracao_vazia_criticamente(r["ia_raw"])]
+        if ainda_pendentes:
+            log.error(sanitize_emoji("  ❌ %d comprovante(s) Rota Verde não puderam ser lidos mesmo após "
+                                      "releitura - bloqueando lançamento (pedido %s)"), len(ainda_pendentes), pdc)
+            self.teams.erro_ia_envio(pdc, ainda_pendentes[0]["nome"])
+            return [], "ErroLeituraComprovante"
+
+        ia_final = etl.agregar_transacoes_rota_verde([r["ia_raw"] for r in candidatos])
+        ia_final["numNota"] = br.num_nota_por_pedido(ia_final.get("numNota", ""), pdc)
+        log.info(sanitize_emoji("  ├─ 🔄 Rota Verde: %d comprovante(s) somados"), len(candidatos))
+        log.info("  │  ├─ valorMercadoria (soma): %s", ia_final["valorMercadoria"])
+        log.info("  │  └─ dataDocumento (mais antiga): %s", ia_final["dataDocumento"])
+
+        acao_conta = br.calcular_acao_e_conta("RECIBO", cond_pagto)
+        payload, bloq7, diverge_pedido_nf = etl.montar_payload(
+            pedido, dados_pedido, ia_final, cnpj_forn, "RECIBO", acao_conta, "", self.s.timezone)
+        payload["_contexto"] = {
+            "cnpj_emitente": cnpj_forn,
+            "cnpj_tomador": cnpj_filial,
+            "nome_tomador": "",
+            "tipo_doc": "RECIBO",
+            "bloqueia_7d": bloq7,
+            "diverge_pedido_nf": diverge_pedido_nf,
+            "data_documento": ia_final.get("dataDocumento", ""),
+            "cond_pagto": payload.get("condPagto", ""),
+            "data_vencimento": "",
+            "almoxarifado": "",
+            "chave_primaria_raw": "",
+            "chave_extra_raw": "",
+        }
+        return [payload], None
 
     def _processar_seguro(self, pedido: dict) -> list[ResultadoPedido]:
         """Isola falhas: um pedido com erro nao derruba o lote inteiro."""
@@ -209,13 +314,46 @@ class LancamentoController:
         log.info(sanitize_emoji("[ETAPA 4/7] 🤖 Processando anexos com IA..."))
         payloads: list[dict] = []
         contexto: dict[str, Any] = {}
-        anexos_imagem: list[str] = []
         anexos_protegidos: list[str] = []
 
+        # Tier de modelo da IA: "medio" (padrão, mais barato) para a maioria dos fornecedores;
+        # "alto" só para concessionárias com tabela de tarifas complexa/letra pequena (Energisa,
+        # Saneago, Equatorial - ver FANTASIAS_MODEL_TIER_ALTO). O tier "altissimo" (o mais caro)
+        # nunca é escolhido aqui - só entra como retry único quando a extração vem vazia (ver
+        # _escalar_para_altissimo_se_vazio) - sempre prezar pelo custo das chamadas.
+        model_tier_pedido = br.resolver_model_tier(fantasia, FANTASIAS_MODEL_TIER_ALTO)
+        log.info("  ├─ Tier de modelo da IA: %s", model_tier_pedido)
+
+        # Fornecedor Rota Verde Goias SPE S.A.: não manda uma NF de verdade, e sim vários
+        # comprovantes de transação (um por dia/pagamento) - o "documento" lançado é a soma
+        # desses comprovantes (ver _agregar_pagamentos_rota_verde mais abaixo).
+        eh_rota_verde = br.eh_fornecedor_rota_verde(fantasia)
+        if eh_rota_verde:
+            log.info(sanitize_emoji("  ├─ ℹ️  Fornecedor Rota Verde: considerando só anexos 'Valor', "
+                                     "somando as transações"))
+
+        # ───────────────────────────────────────────────────────────────────
+        # Fase 1: extração primária de TODOS os anexos (1 tentativa cada). A classificação NF x
+        # boleto usa o tipoDocFiscal que a própria IA retorna ao ler o conteúdo (BOLP,
+        # BOLP-DETRAN, BOLP-DETRAN-IPVA-ANTT = boleto; qualquer outro tipo = documento principal)
+        # em vez do nome do arquivo, que não é confiável (varia por fornecedor).
+        # ───────────────────────────────────────────────────────────────────
+        resultados: list[dict[str, Any]] = []
         for idx, anexo in enumerate(anexos, 1):
             log.info("  ┌─ Anexo %d/%d", idx, len(anexos))
             nome = str(anexo.get("nomeArquivo", ""))
             log.info("  ├─ Arquivo: %s", nome)
+            r: dict[str, Any] = {"anexo": anexo, "nome": nome, "ia_raw": None, "exc": None, "protegido": False}
+            resultados.append(r)
+
+            # Rota Verde: nunca ler anexo "comprovante" (nem PDF nem imagem) - só processar os que
+            # tiverem "Valor" no nome (ex.: "30-06 Valor 97,50.pdf"). Qualquer outro nome também é
+            # ignorado (o fornecedor só manda esses dois padrões).
+            if eh_rota_verde and not br.eh_anexo_valor_rota_verde(nome):
+                log.info(sanitize_emoji("  ├─ ℹ️  Rota Verde: anexo fora do padrão 'Valor' - ignorado (%s)"), nome)
+                r["protegido"] = True
+                log.info("  └─")
+                continue
 
             # Verificar se é anexo com padrão conhecido de PDF protegido por senha (a IA nunca
             # consegue ler, então nem tenta - evita esperar o timeout de ~7min para só então falhar)
@@ -223,26 +361,26 @@ class LancamentoController:
                 log.warning(sanitize_emoji("  ├─ ⚠️  Arquivo protegido por senha, leitura pela IA não é possível"))
                 anexos_protegidos.append(nome)
                 self.teams.erro_anexo_protegido_senha(pdc, nome)
+                r["protegido"] = True
                 log.info("  └─")
                 continue
 
-            # Verificar se é imagem
-            if nome.lower().endswith(IMAGENS):
-                log.warning(sanitize_emoji("  ├─ ⚠️  Arquivo com extensão de imagem, não é processado pelo RPA"))
-                anexos_imagem.append(nome)
-                detalhes_img = {"Arquivo": nome}
-                self.teams.aviso("Arquivo com extensão de imagem não é processado pelo RPA - requer execução manual",
-                                  pedido=pdc, tipo_negocio=False, detalhes_extra=detalhes_img)
-                log.info("  └─")
-                continue
+            # Imagem (png/jpg/...) agora é processada normalmente pela IA (campo base64_image em
+            # vez de base64_pdf) - não bloqueia mais para execução manual.
+            eh_imagem = nome.lower().endswith(IMAGENS)
+            if eh_imagem:
+                log.info(sanitize_emoji("  ├─ ℹ️  Arquivo é imagem - processado via IA (base64_image)"))
 
-            base64_pdf = anexo.get("anexoBase64", "")
-            log.info("  ├─ Base64 PDF: %d caracteres", len(base64_pdf))
+            base64_conteudo = anexo.get("anexoBase64", "")
+            log.info("  ├─ Base64 %s: %d caracteres", "imagem" if eh_imagem else "PDF", len(base64_conteudo))
+            r["eh_imagem"] = eh_imagem
+            r["base64_conteudo"] = base64_conteudo
 
-            # Extração primária
             log.info(sanitize_emoji("  ├─ 🧠 Executando extração primária (IA 1ª chamada)..."))
             try:
-                ia_raw = self.ia.extrair_primaria(base64_pdf)
+                ia_raw = self.ia.extrair_primaria(base64_conteudo, model_tier=model_tier_pedido, eh_imagem=eh_imagem)
+                ia_raw = self._escalar_para_altissimo_se_vazio(ia_raw, base64_conteudo, eh_imagem, nome)
+                r["ia_raw"] = ia_raw
                 log.info(sanitize_emoji("  │  ✓ Extração primária concluída"))
                 log.info("  │  ├─ tipoDocFiscal: %s", ia_raw.get("tipoDocFiscal", ""))
                 log.info("  │  ├─ numNota: %s", ia_raw.get("numNota", ""))
@@ -251,6 +389,7 @@ class LancamentoController:
                 log.info("  │  └─ JSON completo da IA (primária):")
                 log.info("  │     %s", json.dumps(ia_raw, indent=2, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001
+                r["exc"] = exc
                 if br.eh_fornecedor_provavel_senha(fantasia, FANTASIAS_PROVAVEL_SENHA):
                     # Não é falha de execução do nosso código - fornecedor cujas faturas quase
                     # sempre vêm protegidas por senha (ex.: TIM S/A), mesmo quando o nome do
@@ -259,16 +398,76 @@ class LancamentoController:
                                                 "(provável PDF protegido por senha): %s"), fantasia, exc)
                     anexos_protegidos.append(nome)
                     self.teams.erro_anexo_protegido_senha(pdc, nome)
+                    r["protegido"] = True
                 else:
                     log.exception(sanitize_emoji("  │  ❌ Erro ao enviar Base64 para IA (pedido %s): %s"), pdc, exc)
                     self.teams.erro_ia_envio(pdc, nome)
-                log.info("  └─")
+            log.info("  └─")
+
+        # ───────────────────────────────────────────────────────────────────
+        # Decisão: existe algum anexo lido com sucesso como documento principal (tipoDocFiscal que
+        # não é boleto)? Se não, e outro anexo já leu com sucesso como boleto, assume que o(s)
+        # anexo(s) que falharam/vieram vazios é a NF (padrão comum: NF + boleto no mesmo lote) e
+        # tenta de novo antes de desistir - nunca lançar usando só os dados do boleto quando a NF
+        # falhar (ver pedido 321037: Doc. Fiscal saiu = código do pedido em vez do número da NF).
+        # ───────────────────────────────────────────────────────────────────
+        def _eh_principal(r: dict) -> bool:
+            return (r["ia_raw"] is not None and not br.eh_extracao_vazia_criticamente(r["ia_raw"])
+                    and not br.eh_tipo_doc_boleto(r["ia_raw"].get("tipoDocFiscal", "")))
+
+        def _eh_boleto_lido(r: dict) -> bool:
+            return r["ia_raw"] is not None and br.eh_tipo_doc_boleto(r["ia_raw"].get("tipoDocFiscal", ""))
+
+        tem_principal = any(_eh_principal(r) for r in resultados)
+        tem_boleto_lido = any(_eh_boleto_lido(r) for r in resultados)
+        candidatos_recovery = [r for r in resultados if not r["protegido"]
+                                and (r["ia_raw"] is None or br.eh_extracao_vazia_criticamente(r["ia_raw"]))]
+
+        if not eh_rota_verde and not tem_principal and tem_boleto_lido and candidatos_recovery:
+            log.warning(sanitize_emoji("  ⚠️  Nenhum documento principal lido ainda e já existe boleto lido com "
+                                        "sucesso - assumindo que %d anexo(s) pode(m) ser a NF, tentando de novo..."),
+                        len(candidatos_recovery))
+            for r in candidatos_recovery:
+                try:
+                    ia_raw_retry = self._extrair_primaria_com_retry(r["base64_conteudo"], model_tier=model_tier_pedido,
+                                                                     eh_imagem=r["eh_imagem"])
+                    ia_raw_retry = self._escalar_para_altissimo_se_vazio(ia_raw_retry, r["base64_conteudo"],
+                                                                         r["eh_imagem"], r["nome"])
+                    r["ia_raw"] = ia_raw_retry
+                    r["exc"] = None
+                    log.info(sanitize_emoji("  ├─ ✓ Releitura de %s teve sucesso: tipoDocFiscal=%s"),
+                             r["nome"], ia_raw_retry.get("tipoDocFiscal", ""))
+                except Exception as exc:  # noqa: BLE001
+                    r["exc"] = exc
+                    log.exception(sanitize_emoji("  ├─ ❌ Releitura de %s falhou (pedido %s): %s"), r["nome"], pdc, exc)
+            tem_principal = any(_eh_principal(r) for r in resultados)
+            if not tem_principal:
+                log.error(sanitize_emoji("  ❌ Nenhum documento principal encontrado mesmo após releitura - "
+                                          "bloqueando lançamento (pedido %s)"), pdc)
+                self.teams.erro_ia_envio(pdc, candidatos_recovery[0]["nome"])
+                res.deve_lancar = False
+                res.status = "ErroLeituraNF"
+                log.info("  └─ Status final: %s", res.status)
+                return [res]
+
+        # ───────────────────────────────────────────────────────────────────
+        # Fase 2: para cada anexo lido com sucesso (documento principal ou boleto), completa o
+        # restante do pipeline (extração extra, Equatorial, consolidação, montagem do payload).
+        # ───────────────────────────────────────────────────────────────────
+        for r in resultados:
+            if eh_rota_verde or r["ia_raw"] is None or br.eh_extracao_vazia_criticamente(r["ia_raw"]):
                 continue
+            anexo = r["anexo"]
+            nome = r["nome"]
+            eh_imagem = r["eh_imagem"]
+            base64_conteudo = r["base64_conteudo"]
+            ia_raw = r["ia_raw"]
+            log.info("  ┌─ Continuando processamento: %s (tipoDocFiscal=%s)", nome, ia_raw.get("tipoDocFiscal", ""))
 
             # Extração extra
             log.info(sanitize_emoji("  ├─ 🧠 Executando extração extra (IA 2ª chamada)..."))
             try:
-                extra_raw = self.ia.extrair_extra(base64_pdf)
+                extra_raw = self.ia.extrair_extra(base64_conteudo, model_tier=model_tier_pedido, eh_imagem=eh_imagem)
                 log.info(sanitize_emoji("  │  ✓ Extração extra concluída"))
                 log.info("  │  ├─ issRetido: %s", extra_raw.get("issRetido", False))
                 log.info("  │  ├─ valorISSRetido: %s", extra_raw.get("valorISSRetido", "0.00"))
@@ -291,7 +490,7 @@ class LancamentoController:
             if br.eh_fornecedor_equatorial(fantasia):
                 log.info(sanitize_emoji("  ├─ 🧠 Executando extração Equatorial (IA 3ª chamada, FORNECIMENTO/ITENS FINANCEIROS)..."))
                 try:
-                    equatorial_raw = self.ia.extrair_equatorial(base64_pdf)
+                    equatorial_raw = self.ia.extrair_equatorial(base64_conteudo, model_tier=model_tier_pedido, eh_imagem=eh_imagem)
                     log.info(sanitize_emoji("  │  ✓ Extração Equatorial concluída"))
                     log.info("  │  ├─ totalFornecimento: %s", equatorial_raw.get("totalFornecimento", ""))
                     log.info("  │  └─ itensFinanceiros: %s", equatorial_raw.get("itensFinanceiros", []))
@@ -365,6 +564,25 @@ class LancamentoController:
                 # saiu R$623,62 quando o correto era R$284,46). Nunca lançar automaticamente sem
                 # essa reconciliação bater com o TOTAL da fatura.
                 reconciliado, detalhe_reconciliacao = br.reconciliacao_equatorial(ia_final)
+                if not reconciliado and model_tier_pedido != br.MODEL_TIER_ALTISSIMO:
+                    # 1 retry único com o tier altissimo (o mais caro) antes de desistir e mandar
+                    # para conferência manual - reservado a esse caso extremo de reconciliação.
+                    log.warning(sanitize_emoji("  │  ⚠️  Reconciliação Equatorial não bateu com tier %s - "
+                                                "tentando 1x com tier altissimo..."), model_tier_pedido)
+                    try:
+                        equatorial_raw = self.ia.extrair_equatorial(base64_conteudo, model_tier=br.MODEL_TIER_ALTISSIMO,
+                                                                     eh_imagem=eh_imagem)
+                        total_fornecimento = equatorial_raw.get("totalFornecimento", "")
+                        itens_financeiros = equatorial_raw.get("itensFinanceiros", [])
+                        ia_final = br.aplicar_valores_equatorial(ia_final, total_fornecimento, itens_financeiros)
+                        log.info("  │  ℹ️  Equatorial (altissimo): valorMercadoria=%s, totalDespesa=%s, "
+                                 "valorDescontoGeral=%s", ia_final.get("valorMercadoria", ""),
+                                 ia_final.get("totalDespesa", ""), ia_final.get("valorDescontoGeral", ""))
+                        reconciliado, detalhe_reconciliacao = br.reconciliacao_equatorial(ia_final)
+                        if reconciliado:
+                            log.info(sanitize_emoji("  │  ✓ Releitura com tier altissimo reconciliou com sucesso"))
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(sanitize_emoji("  │  ⚠️  Releitura Equatorial com tier altissimo falhou: %s"), exc)
                 if not reconciliado:
                     log.warning(sanitize_emoji("  │  ⚠️  Equatorial: extração FORNECIMENTO/ITENS FINANCEIROS "
                                                "não reconcilia com o total da fatura - %s"), detalhe_reconciliacao)
@@ -463,6 +681,15 @@ class LancamentoController:
             payloads.append(payload)
             log.info("  └─ Anexo processado com sucesso")
 
+        if eh_rota_verde:
+            payloads, status_erro = self._agregar_pagamentos_rota_verde(
+                resultados, pedido, dados_pedido, cond_pagto, pdc, cnpj_forn, cnpj_filial, model_tier_pedido)
+            if status_erro:
+                res.deve_lancar = False
+                res.status = status_erro
+                log.info("  └─ Status final: %s", res.status)
+                return [res]
+
         # ═══════════════════════════════════════════════════════════════════
         # ETAPA 5: Selecionar Payloads a Lançar
         # ═══════════════════════════════════════════════════════════════════
@@ -485,14 +712,6 @@ class LancamentoController:
             payloads_para_lancar = [payload_priorizado] if payload_priorizado else []
 
         if not payloads_para_lancar:
-            if anexos_imagem and len(anexos_imagem) == len(anexos):
-                log.warning(sanitize_emoji("  ⚠️  Anexos são imagem - execução manual necessária"))
-                self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
-                                    erro="Arquivo com extensão de imagem")
-                res.deve_lancar = False
-                res.status = "ImagemManual"
-                log.info("  └─ Status final: %s (registrado no BD)", res.status)
-                return [res]
             if anexos_protegidos and len(anexos_protegidos) == len(anexos):
                 # Não é falha de execução do nosso código - é um impedimento do próprio arquivo.
                 # Já notificado no Teams (erro_anexo_protegido_senha) no momento em que o anexo

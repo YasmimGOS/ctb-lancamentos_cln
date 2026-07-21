@@ -262,7 +262,10 @@ def valida_cond_pagto_por_vencimento(cond_pagto_raw: str, data_documento_br: str
     esperada = calcular_cond_pagto_por_vencimento(data_documento_br, data_vencimento_boleto_br)
     if not esperada:
         return True, ""
-    return esperada == cond_norm, esperada
+    # Compara pela quantidade de dias (int), não pela string formatada: "8D" e "08D" são a
+    # mesma condição de pagamento, só com zero à esquerda diferente (ver docs/REGRAS_PROJETO.md).
+    ok = quantidade_cond_pagto(esperada) == quantidade_cond_pagto(cond_norm)
+    return ok, esperada
 
 
 def resolver_localizacao_almoxarifado(almoxarifado: str) -> str:
@@ -373,6 +376,75 @@ def eh_anexo_protegido_por_senha(nome_arquivo: str, termos_protegidos: set[str])
     pena tentar (evita esperar o timeout de ~7min só para falhar)."""
     nome_upper = (nome_arquivo or "").strip().upper()
     return any(termo.upper() in nome_upper for termo in termos_protegidos)
+
+
+MODEL_TIER_PADRAO = "medio"
+MODEL_TIER_ALTO = "alto"
+MODEL_TIER_ALTISSIMO = "altissimo"
+
+
+def resolver_model_tier(agn_st_fantasia: str, fantasias_tier_alto: set[str]) -> str:
+    """Fornecedores com tabelas de tarifas complexas/letra pequena (concessionárias de energia/água
+    - ex.: Energisa, Saneago, Equatorial) usam o tier "alto" da IA por padrão; os demais usam o
+    tier "medio" (padrão da API, mais barato). Nunca retorna "altissimo" aqui - esse tier (o mais
+    caro) só é usado como retry único quando a extração falha (ver eh_extracao_vazia_criticamente),
+    nunca escolhido antecipadamente por fornecedor."""
+    fantasia_upper = (agn_st_fantasia or "").strip().upper()
+    if any(termo.upper() in fantasia_upper for termo in fantasias_tier_alto):
+        return MODEL_TIER_ALTO
+    return MODEL_TIER_PADRAO
+
+
+def eh_extracao_vazia_criticamente(ia_raw: dict) -> bool:
+    """Indica que a extração da IA não conseguiu ler nada de essencial do documento (tipoDocFiscal,
+    numNota e valorTotalDocumento todos vazios) - usado para decidir se vale a pena 1 retry com o
+    tier "altissimo" (o mais caro, reservado a esses casos extremos de raciocínio pesado)."""
+    campos_essenciais = ("tipoDocFiscal", "numNota", "valorTotalDocumento")
+    return all(not str((ia_raw or {}).get(campo, "")).strip() for campo in campos_essenciais)
+
+
+TIPOS_DOC_BOLETO = {"BOLP", "BOLP-DETRAN", "BOLP-DETRAN-IPVA-ANTT"}
+
+
+def eh_tipo_doc_boleto(tipo_doc_fiscal: str) -> bool:
+    """tipoDocFiscal retornado pela IA que indica boleto/cobrança (documento secundário, não deve
+    ser usado sozinho como fonte de um lançamento quando falta o documento principal/NF - ver
+    prompts/prompt_1a_ia.txt regras 11-13). Ao contrário de uma checagem por nome de arquivo, usa o
+    tipo já classificado pela IA a partir da leitura do conteúdo - mais confiável que o nome, que
+    varia de fornecedor para fornecedor (ver pedido 321037: NF e boleto no mesmo lote de anexos)."""
+    return (tipo_doc_fiscal or "").strip().upper() in TIPOS_DOC_BOLETO
+
+
+def eh_fornecedor_rota_verde(agn_st_fantasia: str) -> bool:
+    """Fornecedor Rota Verde Goias SPE S.A. - não manda uma NF de verdade, e sim vários
+    comprovantes de transação (e-mails encaminhados salvos em PDF, um por transação/dia). O
+    "documento fiscal" lançado é a soma desses comprovantes (ver
+    services/etl_service.py::agregar_transacoes_rota_verde)."""
+    return "ROTA VERDE" in (agn_st_fantasia or "").strip().upper()
+
+
+def eh_anexo_valor_rota_verde(nome_arquivo: str) -> bool:
+    """Anexo válido para o fluxo Rota Verde: nome contém "valor" (ex.: "30-06 Valor 97,50.pdf").
+    Anexos com "comprovante" no nome NUNCA devem ser lidos (nem como PDF nem como imagem) -
+    duplicidade/versão inferior do mesmo comprovante que já vem no arquivo "Valor"."""
+    nome_upper = (nome_arquivo or "").strip().upper()
+    return "VALOR" in nome_upper and "COMPROVANTE" not in nome_upper
+
+
+def eh_anexo_comprovante_rota_verde(nome_arquivo: str) -> bool:
+    """Anexo que NUNCA deve ser lido no fluxo Rota Verde (nem como PDF, nem como imagem) -
+    ver eh_anexo_valor_rota_verde."""
+    return "COMPROVANTE" in (nome_arquivo or "").strip().upper()
+
+
+def data_documento_mais_antiga(datas_br: list[str]) -> str:
+    """Menor (mais antiga) data dentre uma lista em formato dd/MM/yyyy - usado para consolidar
+    dataDocumento quando um lançamento agrega várias transações (fluxo Rota Verde). Ignora
+    entradas vazias/inválidas; retorna "" se nenhuma for válida."""
+    validas = [d for d in datas_br if fmt.data_br_para_iso(d)]
+    if not validas:
+        return ""
+    return min(validas, key=fmt.data_br_para_iso)
 
 
 def eh_fornecedor_provavel_senha(agn_st_fantasia: str, fantasias_provavel_senha: set[str]) -> bool:

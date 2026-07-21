@@ -273,14 +273,26 @@ Extração de `numNota` e `serie`:
    - `serie` = "001"
 
 6. Nunca usar chave de acesso, pedido, contrato, protocolo, NSU, lote, parcela, RPS, boleto,
-   nosso número, linha digitável ou código de barras como `numNota`.
-7. Nunca concatenar `numNota` com `serie`.
-8. Nunca preencher `serie` com o número da nota.
-9. `serie` normalmente possui de 1 a 4 caracteres alfanuméricos; se tiver muitos dígitos, revisar.
+   nosso número, linha digitável, código de barras ou número da DPS como `numNota`.
+7. ARMADILHA NFS-e modelo nacional (DANFSe): o documento pode trazer dois números diferentes -
+   "Número da DPS" (Declaração de Prestação de Serviços, o documento que o prestador transmite
+   para gerar a nota) e "Número da NFS-e" (a nota fiscal de serviço eletrônica em si, gerada a
+   partir da DPS). São identificadores DIFERENTES, mesmo aparecendo próximos um do outro no
+   cabeçalho ou na mesma tabela de identificação. NUNCA usar o "Número da DPS" como `numNota`.
+   `numNota` deve ser SEMPRE o "Número da NFS-e" (às vezes rotulado apenas "NFS-e nº" ou "Número
+   da Nota"). Se o documento só trouxer o número da DPS, sem nenhuma identificação explícita do
+   número da NFS-e, deixar `numNota` como "" em vez de usar o número da DPS por engano.
+8. Nunca concatenar `numNota` com `serie`.
+9. Nunca preencher `serie` com o número da nota.
+10. `serie` normalmente possui de 1 a 4 caracteres alfanuméricos; se tiver muitos dígitos, revisar.
 
 Regra de data do documento (dataDocumento):
 1. `dataDocumento` deve ser SEMPRE a data de emissão/documento do arquivo, NUNCA a data de
    vencimento.
+1b. Se o arquivo for um e-mail encaminhado salvo em PDF (identificável por cabeçalho de e-mail:
+    "De:", "Para:", "Enviado em:"/"Data:", "Assunto:"), usar a data desse cabeçalho de e-mail
+    ("Enviado em" ou "Data") como `dataDocumento` - mesmo que outra data apareça no corpo da
+    mensagem, numa captura de tela ou num comprovante colado/anexado dentro do e-mail.
 2. Para BOLETOS e cobranças (tipoDocFiscal BOLP, BOLP-DETRAN, BOLP-DETRAN-IPVA-ANTT, RECIBO),
    usar a "Data do Documento" ou, na ausência, a "Data de Processamento" da ficha de compensação.
 3. NUNCA usar como `dataDocumento` valores rotulados como "Vencimento", "Data de Vencimento",

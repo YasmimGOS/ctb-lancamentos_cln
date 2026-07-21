@@ -179,7 +179,7 @@ ALMOXARIFADO_LOCALIZACAO: dict[str, str] = {
     "1": "25001",
     "146": "32001",
 }
-COND_PAGTO_A_VISTA = {"ADIANT", "TESOURARIA", "A VISTA", "AVISTA", "CREDITO"}
+COND_PAGTO_A_VISTA = {"ADIANT", "TESOURARIA", "A VISTA", "À VISTA", "AVISTA", "CREDITO"}
 TIPOS_DOC_SERVICO = {"NFS-EG", "NFS-E", "NFF", "NFSTE", "NFSC"}
 
 # Fornecedores cuja fatura de serviço foge do padrão de documento previsto para o RPA (ex.: Sitpass,
@@ -200,6 +200,14 @@ ARQUIVOS_PROTEGIDOS_SENHA = {"TIM -VAL"}
 # nosso código) em vez do erro técnico genérico - ver
 # controllers/lancamento_controller.py::processar_pedido.
 FANTASIAS_PROVAVEL_SENHA = {"TIM S/A"}
+
+# Fornecedores (AGN_ST_FANTASIA, comparação por substring maiúscula) cujas faturas trazem tabelas
+# de tarifas complexas e letra pequena (concessionárias de energia/água) - usam o tier "alto" da
+# IA por padrão em vez do tier "medio" (ver services/business_rules.py::resolver_model_tier).
+# Prezar pelo custo das chamadas: só entram aqui fornecedores com histórico concreto de tabela
+# difícil - o tier "altissimo" (mais caro ainda) nunca é escolhido por fornecedor, só como retry
+# único quando a extração falha (ver eh_extracao_vazia_criticamente).
+FANTASIAS_MODEL_TIER_ALTO = {"ENERGISA", "SANEAGO", "EQUATORIAL"}
 
 # De-para fantasia (AGN_ST_FANTASIA do pedido) -> CNPJ correto do emitente, usado para corrigir a
 # leitura da IA em fornecedores que ela erra com frequência (ex.: a IA lê um CNPJ incompleto/
