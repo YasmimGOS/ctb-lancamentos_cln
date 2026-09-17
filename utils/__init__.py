@@ -1,3 +1,4 @@
 from . import formatter, validators
 from .logger import get_logger, sanitize_emoji
-__all__ = ["formatter", "validators", "get_logger", "sanitize_emoji"]
+from .pdf_preproc import preparar_pdf_para_ia
+__all__ = ["formatter", "validators", "get_logger", "sanitize_emoji", "preparar_pdf_para_ia"]

@@ -8,6 +8,9 @@ dependencies = [
     "requests>=2.31",
     "python-dateutil>=2.9",
     "python-dotenv>=1.0",
+    # Pre-processamento de PDFs sem camada de texto (utils/pdf_preproc.py).
+    # Opcional em runtime: se ausente, o fluxo segue enviando o PDF original.
+    "pymupdf>=1.24",
 ]
 
 [project.optional-dependencies]

@@ -132,7 +132,16 @@ Formatação:
      12 dígitos para CPF).
 
 4. Chave de acesso NF-e/NFC-e/CT-e/NFS-e:
-   - Deve conter exatamente 44 dígitos.
+   - TAMANHO CONFORME O MODELO (regra crítica - não há tamanho único):
+       - NF-e, NFC-e, CT-e, CT-EOS, NF3E, NFSC, NFSTe e DANFCom: exatamente 44 dígitos,
+         impressos em 11 grupos de 4.
+       - NFS-e do modelo NACIONAL (DANFSe / "Documento Auxiliar da NFS-e", cabeçalho "DANFSe v2.0"
+         ou similar): a "CHAVE DE ACESSO DA NFS-e" tem exatamente 50 dígitos, NÃO 44. Nesse caso,
+         transcrever os 50 dígitos e NUNCA truncar para 44 nem descartar a chave por ela não ter
+         44 dígitos. A chave costuma aparecer duas vezes: no topo, sob o rótulo "CHAVE DE ACESSO
+         DA NFS-e", e no rodapé, no campo "N° NFS-e / CHAVE NFS-e" no formato "13 / 5208707...".
+       - NFS-e de modelo municipal antigo: em geral não possui chave de acesso; usar "".
+   - Conferir o tamanho contra o modelo identificado antes de responder.
    - Remover qualquer caractere não numérico.
    - No documento, a chave é sempre impressa em 11 grupos de 4 dígitos separados por espaço
      (ex.: "5226 0707 0719 7700 0149 5500 1000 0003 0718 9013 1292"). Leia grupo por grupo, da
@@ -147,7 +156,50 @@ Formatação:
      grupo com dígitos repetidos, conte os 4 caracteres um a um antes de seguir para o próximo
      grupo - nunca funda dois dígitos iguais em um só. Caso real: grupo correto "1811" foi lido
      como "181" (perdeu um dos dois "1"), o que sozinho já derruba a chave para 43 dígitos.
-   - Se não houver chave de 44 dígitos, usar "".
+   - Se não houver chave com o tamanho esperado para o modelo identificado (44 ou 50 dígitos), usar "".
+
+Glossário de rótulos do layout NFS-e NACIONAL (DANFSe v2.0):
+Este layout substitui progressivamente os layouts municipais antigos e usa NOMES DE CAMPO
+DIFERENTES. Ao identificar o cabeçalho "DANFSe" / "Documento Auxiliar da NFS-e", traduzir assim:
+
+1. Blocos das partes:
+   - Prestador: o bloco chama-se "PRESTADOR / FORNECEDOR" (e o rótulo "EMITENTE DA NFS-e"
+     aparece logo acima). NÃO existe o bloco "Dados do Prestador de Serviço".
+   - Tomador: o bloco chama-se "TOMADOR / ADQUIRENTE". NÃO existe "Dados do Tomador de Serviços".
+   - Dentro de CADA bloco os rótulos são IDÊNTICOS ("CNPJ / CPF / NIF", "Nome / Nome Empresarial",
+     "Município / Sigla UF"). Conferir SEMPRE o título do bloco antes de copiar um valor - nunca
+     preencher `cnpjCpfTomador`/`nomeTomador` com os dados do prestador, e vice-versa.
+   - Ignorar as linhas "DESTINATÁRIO DA OPERAÇÃO NÃO IDENTIFICADO NA NFS-e" e "INTERMEDIÁRIO DA
+     OPERAÇÃO NÃO IDENTIFICADO NA NFS-e": são avisos, não são o tomador.
+
+2. Valores:
+   - O valor bruto do serviço é "VALOR DA OPERAÇÃO / SERVIÇO" (ou, na ausência, "VALOR TOTAL DA
+     NFS-e"). Esse é o valor a usar como `valorMercadoria`.
+   - O valor líquido é "VALOR LÍQUIDO DA NFS-e".
+   - ARMADILHA: existe um campo "VALOR LÍQUIDO DA NFS-e + IBS/CBS" que, na fase de transição da
+     reforma tributária, costuma vir "R$ 0,00". NUNCA usar esse campo como `valorTotalDocumento`
+     nem como `valorMercadoria`. O mesmo vale para "Total do IBS/CBS", "Valor Total Apurado - IBS"
+     e "Valor Total Apurado - CBS", que também costumam vir zerados ou com "-".
+
+3. Números e datas:
+   - `numNota` = "NÚMERO DA NFS-e". NUNCA "NÚMERO DA DPS" nem "SÉRIE DA DPS" (ver regra 7 de
+     "Extração de `numNota` e `serie`"). No rodapé, o campo "N° NFS-e / CHAVE NFS-e" traz
+     "<número> / <chave>": o número é APENAS a parte antes da barra.
+   - `serie`: neste layout a série impressa ("SÉRIE DA DPS") é da DPS, não da NFS-e. Não usar a
+     série da DPS como `serie` da nota; se não houver série própria da NFS-e, usar "".
+   - `dataDocumento` = "COMPETÊNCIA DA NFS-e". Na ausência, "DATA E HORA DA EMISSÃO DA NFS-e"
+     (somente a data). NUNCA usar "DATA E HORA DA EMISSÃO DA DPS" nem "DATA CIENTIFICAÇÃO".
+
+4. Tributos:
+   - O bloco chama-se "TRIBUTAÇÃO MUNICIPAL (ISSQN)" e traz "BC ISSQN", "Alíquota Aplicada",
+     "Retenção do ISSQN" e "ISSQN Apurado".
+   - O campo "Retenção do ISSQN" com valor "Não Retido" significa ISSQN NÃO RETIDO: aplicar a
+     regra de zerar `baseISS`, `percentualISS`, `valorISS` e `totalISS`.
+   - O bloco "TRIBUTAÇÃO FEDERAL (EXCETO CBS)" traz IRRF, "Contribuição Previdenciária - Retida"
+     e "Contribuições Sociais - Retidas". Campos com "-" significam ausência de valor: usar "0.00".
+
+5. Campos preenchidos com "-" em qualquer bloco deste layout significam ausência de valor.
+   Tratar como vazio ("" para texto, "0.00" para monetário), nunca como o literal "-".
 
 Processo interno antes do JSON final:
 1. Identificar o documento fiscal principal.
@@ -465,6 +517,8 @@ Regra para ISS/ISSQN não retido, não devido ou não incidente:
 2. São indicações explícitas de não retenção ou não exigibilidade:
    - "ISSQN Retido: Não"
    - "ISS Retido: Não"
+   - "Retenção do ISSQN: Não Retido" (rótulo/valor usados no layout DANFSe v2.0)
+   - "Retenção do ISS: Não Retido"
    - "Retenção do ISSQN: Não"
    - "Retenção do ISS: Não"
    - "ISSQN Não Retido"
