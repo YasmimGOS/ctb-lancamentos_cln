@@ -1121,6 +1121,36 @@ chave.
 - **Nota:** este pedido especificamente NÃO tem lançamento incorreto a corrigir no Mega - ele foi
   apenas bloqueado (status `CondPagtoDivergente`), não lançado com dado errado. Basta reprocessar.
 
+### 3.20 Fornecedor com estrutura de itens variável (ENERGISA, EQUATORIAL) - execução manual obrigatória (27/07/2026)
+
+- **Regra:** se `AGN_ST_FANTASIA` for (ou **conter**) "ENERGISA" (ex.: "ENERGISA TOCANTINS -
+  DISTRIBUIDORA DE ENERGIA S.A") ou (ou conter) "EQUATORIAL" (ex.: "EQUATORIAL ENERGIA GOIAS"), o
+  RPA **não processa** o pedido - bloqueio ANTES de qualquer chamada de IA, sempre lançamento
+  manual. Match por substring (não precisa ser o nome fantasia exato).
+- **Motivo:** a estrutura de itens da fatura desses fornecedores é variável demais para o RPA
+  processar de forma confiável (ver histórico de tentativas de extração da Equatorial na seção
+  3.11 - mesmo após 4 versões de prompt, a IA seguiu errando de forma sistemática o layout de
+  tabela dessas faturas).
+- **Registro no BD:** diferente de um erro técnico, este bloqueio registra status **"Sucesso"** no
+  BD (via `bpms.registrar`), com o campo `erro` informando o nome fantasia do fornecedor e o motivo
+  ("nao sera executado pelo RPA pela estrutura variavel dos itens da fatura"), para não reprocessar
+  o mesmo pedido indefinidamente.
+- **Implementação:** `config/settings.py::FANTASIAS_ESTRUTURA_ITENS_VARIAVEL = {"ENERGISA",
+  "EQUATORIAL"}`, `services/business_rules.py::eh_fornecedor_estrutura_itens_variavel` (substring,
+  case-insensitive), verificação prévia em `controllers/lancamento_controller.py::processar_pedido`
+  (logo após a verificação de `FANTASIAS_EXECUCAO_MANUAL`, mesmo padrão).
+- **Nota:** distinto de `FANTASIAS_EXECUCAO_MANUAL` (seção usada para Sitpass/CIA METROPOLITANA),
+  que exige match EXATO do nome fantasia; aqui o match é por substring, a pedido explícito do
+  usuário.
+- **Atualização (27/07/2026):** `FANTASIAS_MODEL_TIER_ALTO` (`{"ENERGISA", "SANEAGO", "EQUATORIAL"}`,
+  usada para escolher o tier "alto" da IA para essas concessionárias) foi **removida por completo**
+  a pedido do usuário, junto com `services/business_rules.py::resolver_model_tier` e a constante
+  `MODEL_TIER_ALTO`. Motivo: ENERGISA/EQUATORIAL já bloqueiam antes de chegar à IA (regra acima), e
+  o usuário optou por remover também o tratamento especial da SANEAGO - todos os fornecedores agora
+  usam o tier "medio" (`MODEL_TIER_PADRAO`) por padrão. `MODEL_TIER_ALTISSIMO` foi mantido (retry
+  único quando a extração vem vazia, não é escolha por fornecedor - ver
+  `_escalar_para_altissimo_se_vazio`).
+
 ---
 
 ## 4. Integracao IA (Claude)
@@ -1216,6 +1246,19 @@ chave.
 ---
 
 ## 9. Changelog
+
+### v1.6 (27/07/2026) - Bloqueio ENERGISA/EQUATORIAL por estrutura de itens variável (ver 3.20)
+- Novo bloqueio prévio (antes de qualquer chamada de IA): fornecedor com `AGN_ST_FANTASIA`
+  contendo "ENERGISA" ou "EQUATORIAL" nunca é processado pelo RPA - sempre lançamento manual.
+- `config/settings.py::FANTASIAS_ESTRUTURA_ITENS_VARIAVEL`,
+  `services/business_rules.py::eh_fornecedor_estrutura_itens_variavel` (match por substring),
+  verificação prévia em `controllers/lancamento_controller.py::processar_pedido`.
+- Registra status "Sucesso" no BD (não "Excecao"), com o motivo no campo `erro`, para não
+  reprocessar o mesmo pedido.
+- **Remoção:** `FANTASIAS_MODEL_TIER_ALTO`, `services/business_rules.py::resolver_model_tier` e a
+  constante `MODEL_TIER_ALTO` foram removidos por completo (a pedido do usuário). Todos os
+  fornecedores (incluindo SANEAGO, que não tem bloqueio) agora usam o tier "medio" padrão da IA;
+  `model_tier_pedido` em `lancamento_controller.py` passou a ser sempre `br.MODEL_TIER_PADRAO`.
 
 ### v1.5 (18/07/2026) - Anexo PDF protegido por senha pula chamada de IA (ver 3.14)
 - Corrige caso real: pedido 137203, fornecedor TIM S/A, arquivo protegido por senha causava

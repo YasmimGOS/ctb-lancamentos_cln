@@ -7,6 +7,7 @@ from __future__ import annotations
 from config import (
     ALMOXARIFADO_LOCALIZACAO,
     CNPJ_ALUGUEL_IR,
+    CNPJS_PRESTADOR_GOIANIA,
     COND_PAGTO_A_VISTA,
     DEPARA_FILIAIS,
     TABELA_DEPARA_TIPODOC,
@@ -29,6 +30,20 @@ def resolver_tipo_doc_por_emitente(tipo_doc_ia: str, cnpj_emitente: str) -> str:
     if eh_apolice(tipo):
         return tipo
     return TIPO_DOC_POR_EMITENTE.get(val.normaliza_cnpj(cnpj_emitente), tipo)
+
+
+def corrigir_nfs_eg_por_prestador_goiania(tipo_doc: str, cnpj_emitente: str) -> str:
+    """Reclassifica "NFS-E" para "NFS-EG" quando o emitente e um prestador ja confirmado como
+    sediado em Goiania (config.CNPJS_PRESTADOR_GOIANIA), mas a IA classificou como NFS-E generico -
+    normalmente porque leu o municipio do prestador errado (ex.: "Goianira" no lugar de "Goiania",
+    municipios distintos - ver prompts/prompt_1a_ia.txt regra 5).
+
+    So reclassifica quando tipo_doc ja e exatamente "NFS-E" - nao mexe em BOLP, APOLICE etc, para
+    nao atropelar a classificacao de outros anexos do mesmo pedido (ex.: boleto) que venham do
+    mesmo CNPJ. Caso real: pedido 5876/nota 1062, Digital Midia Ltda."""
+    if tipo_doc == "NFS-E" and val.normaliza_cnpj(cnpj_emitente) in CNPJS_PRESTADOR_GOIANIA:
+        return "NFS-EG"
+    return tipo_doc
 
 
 def ajustar_bolp_detran(tipo_doc: str) -> str:
@@ -370,6 +385,14 @@ def eh_fatura_execucao_manual(agn_st_fantasia: str, fantasias_manuais: set[str])
     return (agn_st_fantasia or "").strip().upper() in {f.upper() for f in fantasias_manuais}
 
 
+def eh_fornecedor_estrutura_itens_variavel(agn_st_fantasia: str, termos_bloqueio: set[str]) -> bool:
+    """Fornecedores cuja fatura tem estrutura de itens variável demais para o RPA processar de
+    forma confiável (ex.: ENERGISA, EQUATORIAL) - bloqueia por conter o termo no nome fantasia
+    (substring), diferente de eh_fatura_execucao_manual que exige match exato."""
+    fantasia_upper = (agn_st_fantasia or "").strip().upper()
+    return any(termo.upper() in fantasia_upper for termo in termos_bloqueio)
+
+
 def eh_anexo_protegido_por_senha(nome_arquivo: str, termos_protegidos: set[str]) -> bool:
     """Nome do arquivo contém termo conhecido de PDF protegido por senha (ex.: faturas Tim,
     padrão "Tim -Val-...") - nesses casos a IA nunca consegue ler o conteúdo, então nem vale a
@@ -379,20 +402,7 @@ def eh_anexo_protegido_por_senha(nome_arquivo: str, termos_protegidos: set[str])
 
 
 MODEL_TIER_PADRAO = "medio"
-MODEL_TIER_ALTO = "alto"
 MODEL_TIER_ALTISSIMO = "altissimo"
-
-
-def resolver_model_tier(agn_st_fantasia: str, fantasias_tier_alto: set[str]) -> str:
-    """Fornecedores com tabelas de tarifas complexas/letra pequena (concessionárias de energia/água
-    - ex.: Energisa, Saneago, Equatorial) usam o tier "alto" da IA por padrão; os demais usam o
-    tier "medio" (padrão da API, mais barato). Nunca retorna "altissimo" aqui - esse tier (o mais
-    caro) só é usado como retry único quando a extração falha (ver eh_extracao_vazia_criticamente),
-    nunca escolhido antecipadamente por fornecedor."""
-    fantasia_upper = (agn_st_fantasia or "").strip().upper()
-    if any(termo.upper() in fantasia_upper for termo in fantasias_tier_alto):
-        return MODEL_TIER_ALTO
-    return MODEL_TIER_PADRAO
 
 
 def eh_extracao_vazia_criticamente(ia_raw: dict) -> bool:

@@ -170,6 +170,15 @@ CNPJ_VIBRA_ENERGIA = "34274233030605"
 CNPJ_APLICACAO_281 = "04554425000120"
 CNPJ_EQUATORIAL = "00316622501205"
 
+# Prestadores de servico confirmados como sediados em Goiania (empresa, nao o local do servico -
+# ver prompts/prompt_1a_ia.txt regra 5), usados para corrigir tipoDocFiscal de "NFS-E" para
+# "NFS-EG" quando a IA erra a leitura do municipio do prestador (ex.: le "Goianira" no lugar de
+# "Goiania" - municipios distintos). Caso real: pedido 5876/nota 1062, Digital Midia Ltda lancada
+# como NFS-E porque a IA leu o municipio do prestador como "Goianira".
+CNPJS_PRESTADOR_GOIANIA = {
+    "35727978000134",  # Digital Midia Ltda
+}
+
 # TEMPORÁRIO: de-para Almoxarifado -> Localização, usado só para AVISO/bloqueio manual hoje
 # (ver services/business_rules.py::resolver_localizacao_almoxarifado e
 # controllers/lancamento_controller.py, validação "Almoxarifado"). O Mega Integrador ainda não
@@ -187,6 +196,12 @@ TIPOS_DOC_SERVICO = {"NFS-EG", "NFS-E", "NFF", "NFSTE", "NFSC"}
 # nunca deve ir para execução automática; sempre lançamento manual.
 FANTASIAS_EXECUCAO_MANUAL = {"CIA METROPOLITANA DE TRANSPORTE COLETIVO"}
 
+# Fornecedores cuja fatura tem estrutura de itens variável demais para o RPA processar de forma
+# confiável (ex.: ENERGISA TOCANTINS - DISTRIBUIDORA DE ENERGIA S.A, EQUATORIAL ENERGIA GOIAS) -
+# bloqueia ANTES de qualquer processamento, sempre lançamento manual. Match por substring (basta o
+# nome fantasia CONTER o termo), diferente de FANTASIAS_EXECUCAO_MANUAL que é match exato.
+FANTASIAS_ESTRUTURA_ITENS_VARIAVEL = {"ENERGISA", "EQUATORIAL"}
+
 # Termos conhecidos no nome do arquivo de anexo que indicam PDF protegido por senha (a IA nunca
 # consegue ler o conteúdo, o job trava em PROCESSING e falha por timeout - ex.: pedido 137203,
 # nota Tim, arquivo "Tim -Val- 5813689404 - 11-08-2026.pdf"). Ao detectar o termo, pula a chamada
@@ -200,14 +215,6 @@ ARQUIVOS_PROTEGIDOS_SENHA = {"TIM -VAL"}
 # nosso código) em vez do erro técnico genérico - ver
 # controllers/lancamento_controller.py::processar_pedido.
 FANTASIAS_PROVAVEL_SENHA = {"TIM S/A"}
-
-# Fornecedores (AGN_ST_FANTASIA, comparação por substring maiúscula) cujas faturas trazem tabelas
-# de tarifas complexas e letra pequena (concessionárias de energia/água) - usam o tier "alto" da
-# IA por padrão em vez do tier "medio" (ver services/business_rules.py::resolver_model_tier).
-# Prezar pelo custo das chamadas: só entram aqui fornecedores com histórico concreto de tabela
-# difícil - o tier "altissimo" (mais caro ainda) nunca é escolhido por fornecedor, só como retry
-# único quando a extração falha (ver eh_extracao_vazia_criticamente).
-FANTASIAS_MODEL_TIER_ALTO = {"ENERGISA", "SANEAGO", "EQUATORIAL"}
 
 # De-para fantasia (AGN_ST_FANTASIA do pedido) -> CNPJ correto do emitente, usado para corrigir a
 # leitura da IA em fornecedores que ela erra com frequência (ex.: a IA lê um CNPJ incompleto/

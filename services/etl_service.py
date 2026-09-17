@@ -82,6 +82,7 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     ia["numNota"] = br.num_nota_por_pedido(ia.get("numNota", ""), pdc_codigo)
     ia = br.calcular_percentuais_por_valor_e_base(ia)
     tipo_doc = br.resolver_tipo_doc_por_emitente(ia.get("tipoDocFiscal", ""), cnpj_emitente)
+    tipo_doc = br.corrigir_nfs_eg_por_prestador_goiania(tipo_doc, cnpj_emitente)
     ia["tipoDocFiscal"] = tipo_doc
     # totalISSDevido sempre espelha totalISS (Power Automate: coalesce(totalISS, '0.00')) -
     # calculado por ultimo para refletir todos os ajustes de ISS acima (retido, corrigido, zerado).
@@ -431,6 +432,20 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     base_icms_raiz = "0" if is_servico else str(ia.get("baseICMS", "0.00"))
     base_ipi_raiz = "0" if is_servico else str(ia.get("valorBaseIPI", "0.00"))
 
+    # valorICMS da raiz: usar o valor da IA somente se for um float valido (fmt.to_float retorna
+    # 0.0 para lixo como "92.750.00" - dois pontos, comum quando a IA converte "92.750,00" trocando
+    # so a virgula decimal e esquece de remover o separador de milhar). Nesse caso recalcular por
+    # percentual x base, igual ja se faz no item (montar_item::valor_ou_calc) - caso real: pedido
+    # 320872/nota 241029, Mega rejeitou com 400 (RCB_RE_VLICMS nao e float valido) porque a raiz
+    # repassava o texto malformado da IA sem normalizar, enquanto o item ja saia certo (92750.00).
+    valor_icms_ia = fmt.to_float(ia.get("valorICMS", "0"))
+    if valor_icms_ia > 0:
+        valor_icms_raiz = fmt.format_number(valor_icms_ia)
+    else:
+        base_icms_calc = fmt.to_float(ia.get("baseICMS", "0"))
+        perc_icms_calc = fmt.to_float(ia.get("percentualIcms", "0"))
+        valor_icms_raiz = fmt.format_number(base_icms_calc * perc_icms_calc / 100) if base_icms_calc > 0 and perc_icms_calc > 0 else "0.00"
+
     tipo_preco = str(_g(dados_pedido[0] if dados_pedido else {}, "TIPO_PRECO", default=""))
     centro_custo = str(_g(dados_pedido[0] if dados_pedido else {}, "CC_RATEIO", "CC_PADRAO", default=""))
     projeto = str(_g(dados_pedido[0] if dados_pedido else {}, "PROJETO", "PROJ_PADRAO", default=""))
@@ -466,7 +481,7 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
         "valorAcrescimoGeral": str(ia.get("valorAcrescimoGeral", "0.00")),
         "valorDescontoGeral": str(ia.get("valorDescontoGeral", "0.00")),
         "baseICMS": base_icms_raiz,
-        "valorICMS": str(ia.get("valorICMS", "0.00")),
+        "valorICMS": valor_icms_raiz,
         "valorIPI": str(ia.get("valorIPI", "0.00")),
         "totalISS": str(ia.get("totalISS", "0.00")),
         "totalISSDevido": str(ia.get("totalISSDevido", "0.00")),

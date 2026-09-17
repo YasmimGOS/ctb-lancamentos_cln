@@ -21,7 +21,7 @@ from typing import Any
 
 from config import (
     ARQUIVOS_PROTEGIDOS_SENHA, CNPJ_CORRETO_POR_FANTASIA, CNPJ_TOMADOR_CORRETO_POR_FANTASIA,
-    CNPJ_VIBRA_ENERGIA, FANTASIAS_EXECUCAO_MANUAL, FANTASIAS_MODEL_TIER_ALTO,
+    CNPJ_VIBRA_ENERGIA, FANTASIAS_ESTRUTURA_ITENS_VARIAVEL, FANTASIAS_EXECUCAO_MANUAL,
     FANTASIAS_PROVAVEL_SENHA, get_settings,
 )
 from models import ResultadoPedido
@@ -33,7 +33,7 @@ from services.integra_bpms_service import IntegraBpmsService
 from services.integra_megaintegrador_service import IntegraMegaIntegradorService
 from services.notification_service import NotificationService
 from utils import formatter as fmt
-from utils import get_logger, sanitize_emoji
+from utils import get_logger, preparar_pdf_para_ia, sanitize_emoji
 from utils import validators as val
 
 log = get_logger("controller")
@@ -248,6 +248,23 @@ class LancamentoController:
         log.info(sanitize_emoji("  ✓ Fornecedor dentro do padrão"))
 
         # ═══════════════════════════════════════════════════════════════════
+        # VERIFICAÇÃO PRÉVIA: Fornecedor com estrutura de itens variável (execução manual)
+        # ═══════════════════════════════════════════════════════════════════
+        log.info(sanitize_emoji("[VERIFICAÇÃO PRÉVIA] 🔍 Verificando se fornecedor tem estrutura de itens variável..."))
+        if br.eh_fornecedor_estrutura_itens_variavel(fantasia, FANTASIAS_ESTRUTURA_ITENS_VARIAVEL):
+            log.warning(sanitize_emoji("  ⚠️  Fornecedor %s tem estrutura de itens variável - bloqueio ativado"), fantasia)
+            msg = "Fornecedor não será executado pelo RPA pela estrutura variável dos itens da fatura - requer lançamento manual"
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra={"Fornecedor": fantasia})
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                erro=f"Motivo: Fornecedor {fantasia} nao sera executado pelo RPA pela "
+                                     f"estrutura variavel dos itens da fatura - lancamento manual")
+            res.deve_lancar = False
+            res.status = "EstruturaItensVariavel"
+            log.info("  └─ Status final: %s (registrado no BD)", res.status)
+            return [res]
+        log.info(sanitize_emoji("  ✓ Fornecedor com estrutura de itens padrão"))
+
+        # ═══════════════════════════════════════════════════════════════════
         # ETAPA 1: Verificar REEMBOLSO
         # ═══════════════════════════════════════════════════════════════════
         log.info(sanitize_emoji("[ETAPA 1/7] 🔍 Verificando se é REEMBOLSO..."))
@@ -316,12 +333,10 @@ class LancamentoController:
         contexto: dict[str, Any] = {}
         anexos_protegidos: list[str] = []
 
-        # Tier de modelo da IA: "medio" (padrão, mais barato) para a maioria dos fornecedores;
-        # "alto" só para concessionárias com tabela de tarifas complexa/letra pequena (Energisa,
-        # Saneago, Equatorial - ver FANTASIAS_MODEL_TIER_ALTO). O tier "altissimo" (o mais caro)
-        # nunca é escolhido aqui - só entra como retry único quando a extração vem vazia (ver
+        # Tier de modelo da IA: sempre "medio" (padrão, mais barato). O tier "altissimo" (o mais
+        # caro) nunca é escolhido aqui - só entra como retry único quando a extração vem vazia (ver
         # _escalar_para_altissimo_se_vazio) - sempre prezar pelo custo das chamadas.
-        model_tier_pedido = br.resolver_model_tier(fantasia, FANTASIAS_MODEL_TIER_ALTO)
+        model_tier_pedido = br.MODEL_TIER_PADRAO
         log.info("  ├─ Tier de modelo da IA: %s", model_tier_pedido)
 
         # Fornecedor Rota Verde Goias SPE S.A.: não manda uma NF de verdade, e sim vários
@@ -373,6 +388,18 @@ class LancamentoController:
 
             base64_conteudo = anexo.get("anexoBase64", "")
             log.info("  ├─ Base64 %s: %d caracteres", "imagem" if eh_imagem else "PDF", len(base64_conteudo))
+
+            # PDFs sem camada de texto (DANFSe v2.0 vetorizada, digitalizacoes) sao
+            # rasterizados a 300 DPI antes do envio - melhora a leitura de digitos
+            # (CNPJ, chave de acesso, valores). PDFs com texto seguem inalterados.
+            # Em qualquer falha, devolve o conteudo original (ver utils/pdf_preproc.py).
+            if not eh_imagem:
+                base64_preparado = preparar_pdf_para_ia(base64_conteudo, nome)
+                if base64_preparado is not base64_conteudo:
+                    log.info("  ├─ Base64 PDF apos pre-processamento: %d caracteres",
+                             len(base64_preparado))
+                base64_conteudo = base64_preparado
+
             r["eh_imagem"] = eh_imagem
             r["base64_conteudo"] = base64_conteudo
 
