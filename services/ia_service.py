@@ -5,6 +5,8 @@ import json
 import time
 from pathlib import Path
 
+import requests
+
 from config import get_settings
 from utils import get_logger, sanitize_emoji
 from services.http_client import request_json
@@ -33,6 +35,61 @@ class IaService:
 
     def __init__(self, settings=None):
         self.s = settings or get_settings()
+
+    def verificar_servico_ia(self) -> "tuple[bool, str]":
+        """Verifica se o servico de IA esta operacional antes de processar arquivos.
+
+        Distingue dois cenarios de falha:
+        - Deploy quebrado: Cloud Run retorna HTML 404 (instantaneo) -> TI precisa agir
+        - Cold start (scale-to-zero): container esta acordando -> warm-up resolve
+
+        Returns:
+            (True, "")          -- servico operacional
+            (False, "motivo")   -- servico fora do ar, com descricao do problema
+        """
+        if not self.s.ia_submit_url:
+            return False, "URL de submissao da IA nao configurada"
+
+        base_url = self.s.ia_submit_url.rsplit('/pdf', 1)[0]
+        health_url = f"{base_url}/health"
+        log.info("Verificando saude do servico de IA: %s", health_url)
+
+        try:
+            r = requests.get(health_url, timeout=15)
+            content_type = r.headers.get('Content-Type', '')
+
+            if r.status_code == 200:
+                log.info("Servico de IA operacional (HTTP 200).")
+                return True, ""
+
+            if 'text/html' in content_type:
+                return False, (
+                    f"Servico retornou {r.status_code} HTML - deploy quebrado ou fora do ar. "
+                    "Acione a TI para verificar o Cloud Run 'ai-pdf-intelligence' em us-central1."
+                )
+
+            log.info("Servico respondeu com %s JSON - container ativo, assumindo operacional.", r.status_code)
+            return True, ""
+
+        except requests.exceptions.Timeout:
+            return False, "Timeout de 15s ao verificar o servico - pode estar sobrecarregado ou inicializando."
+        except requests.exceptions.RequestException as e:
+            return False, f"Falha de conexao ao verificar o servico: {e}"
+
+    def aquecer_servico_ia(self) -> bool:
+        """Envia um ping leve para acordar o container em caso de cold start (scale-to-zero).
+
+        Returns:
+            True  -- container esta ativo (ou acabou de acordar)
+            False -- servico esta quebrado (nao e cold start, e falha de deploy)
+        """
+        operacional, motivo = self.verificar_servico_ia()
+        if not operacional:
+            log.warning("Warm-up falhou - servico nao esta acessivel: %s", motivo)
+            return False
+
+        log.info("Warm-up concluido - servico de IA pronto para receber documentos.")
+        return True
 
     def _extrair(self, conteudo_base64: str, prompt: str, model_tier: str = "medio",
                  eh_imagem: bool = False) -> dict:
@@ -99,6 +156,17 @@ class IaService:
             if status == "COMPLETED":
                 log.info(sanitize_emoji("✅ Job IA concluído com sucesso em %.1fs"), tempo_total)
                 return _limpar_json(body.get("intel_answer", "{}"))
+
+            if status in ("FAILED", "EXPIRED"):
+                # Curto-circuito: a IA ja sinalizou que o job nao vai completar -
+                # esperar o timeout inteiro (ate ~7min) so adia um erro que ja e certo.
+                log.error(sanitize_emoji("❌ Job IA %s terminou com status '%s' apos %.1fs - "
+                                          "abortando sem esperar o timeout completo"),
+                          job_id, status, tempo_total)
+                raise RuntimeError(
+                    f"Job IA {job_id} terminou com status '{status}' apos {tempo_total:.1f}s "
+                    "(status terminal, nao e recuperavel via nova tentativa de polling)"
+                )
 
             log.info("   Status atual: %s", status)
 

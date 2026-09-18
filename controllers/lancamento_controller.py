@@ -34,6 +34,7 @@ from services.integra_megaintegrador_service import IntegraMegaIntegradorService
 from services.notification_service import NotificationService
 from utils import formatter as fmt
 from utils import get_logger, preparar_pdf_para_ia, sanitize_emoji
+from utils import pdf_preflight
 from utils import validators as val
 
 log = get_logger("controller")
@@ -50,6 +51,21 @@ class LancamentoController:
         self.teams = teams or NotificationService(self.s, self.id_disparo)
 
     def executar_lote(self) -> list[ResultadoPedido]:
+        # Verifica e aquece o servico de IA antes de processar qualquer pedido.
+        # Se estiver com cold start (scale-to-zero), o ping ja o acorda. Se o
+        # deploy estiver quebrado, aborta o lote inteiro com uma unica
+        # notificacao, em vez de deixar cada pedido falhar sozinho no polling.
+        log.info(sanitize_emoji("🔎 Verificando disponibilidade do serviço de IA..."))
+        servico_ia_ok, motivo_falha_ia = self.ia.verificar_servico_ia()
+        if not servico_ia_ok:
+            log.error(sanitize_emoji("❌ Serviço de IA indisponível: %s"), motivo_falha_ia)
+            self.teams.erro(
+                "Serviço de IA indisponível - execução abortada antes de processar qualquer pedido",
+                detalhes_texto=motivo_falha_ia, tecnico=True
+            )
+            return []
+        log.info(sanitize_emoji("✓ Serviço de IA operacional"))
+
         log.info(sanitize_emoji("🚀 Iniciando obtenção de lista de pedidos..."))
         try:
             lista = self.bpms.obter_lista_pedidos()
@@ -390,22 +406,60 @@ class LancamentoController:
             log.info("  ├─ Base64 %s: %d caracteres", "imagem" if eh_imagem else "PDF", len(base64_conteudo))
 
             # PDFs sem camada de texto (DANFSe v2.0 vetorizada, digitalizacoes) sao
-            # rasterizados a 300 DPI antes do envio - melhora a leitura de digitos
-            # (CNPJ, chave de acesso, valores). PDFs com texto seguem inalterados.
-            # Em qualquer falha, devolve o conteudo original (ver utils/pdf_preproc.py).
+            # rasterizados a 300 DPI antes do envio, com deteccao/correcao automatica
+            # de rotacao (texto vertical) - melhora a leitura de digitos (CNPJ, chave
+            # de acesso, valores). PDFs com texto seguem inalterados. Em qualquer
+            # falha nao fatal, devolve o conteudo original (ver utils/pdf_preflight.py).
+            laudo_preflight: dict[str, Any] = {}
             if not eh_imagem:
-                base64_preparado = preparar_pdf_para_ia(base64_conteudo, nome)
-                if base64_preparado is not base64_conteudo:
-                    log.info("  ├─ Base64 PDF apos pre-processamento: %d caracteres",
-                             len(base64_preparado))
-                base64_conteudo = base64_preparado
+                conteudo_tratado, laudo_preflight = pdf_preflight.normalizar_documento(base64_conteudo, "documento")
+                pdf_preflight.registrar_laudo(laudo_preflight)
+
+                if laudo_preflight.get("bloqueio") == "PDF protegido por senha.":
+                    log.warning(sanitize_emoji("  ├─ ⚠️  PDF protegido por senha detectado pelo pré-voo "
+                                                "(sem precisar esperar o timeout da IA)"))
+                    anexos_protegidos.append(nome)
+                    self.teams.erro_anexo_protegido_senha(pdc, nome)
+                    r["protegido"] = True
+                    log.info("  └─")
+                    continue
+                elif laudo_preflight.get("bloqueio"):
+                    log.warning(sanitize_emoji("  ├─ ⚠️  Pré-voo bloqueou o documento (%s). Enviando conteúdo original."),
+                                laudo_preflight["bloqueio"])
+                elif conteudo_tratado != base64_conteudo:
+                    log.info("  ├─ Base64 PDF após pré-voo: %d caracteres", len(conteudo_tratado))
+                    base64_conteudo = conteudo_tratado
 
             r["eh_imagem"] = eh_imagem
             r["base64_conteudo"] = base64_conteudo
+            r["laudo_preflight"] = laudo_preflight
 
             log.info(sanitize_emoji("  ├─ 🧠 Executando extração primária (IA 1ª chamada)..."))
             try:
                 ia_raw = self.ia.extrair_primaria(base64_conteudo, model_tier=model_tier_pedido, eh_imagem=eh_imagem)
+
+                # Portão de qualidade com retry de rotação: o pré-voo não decide
+                # sozinho entre 90/270 graus quando o texto está na vertical. Se a
+                # extração veio fraca e havia rotação alternativa no laudo, reenvia
+                # uma vez com a rotação oposta antes de escalar para o tier caro
+                # (mais barato e mais provável de resolver do que trocar de modelo).
+                if (not eh_imagem and br.eh_extracao_vazia_criticamente(ia_raw)
+                        and laudo_preflight.get("rotacoes_alternativas")):
+                    alternativa = laudo_preflight["rotacoes_alternativas"][0]
+                    log.info(sanitize_emoji("  │  ⚠️  Extração fraca com a rotação padrão. Reenviando com "
+                                             "rotação alternativa de %s graus..."), alternativa)
+                    conteudo_alt, laudo_alt = pdf_preflight.normalizar_documento(
+                        anexo.get("anexoBase64", ""), "documento", rotacao_forcada=alternativa
+                    )
+                    pdf_preflight.registrar_laudo(laudo_alt)
+                    if not laudo_alt.get("bloqueio"):
+                        ia_raw_alt = self.ia.extrair_primaria(conteudo_alt, model_tier=model_tier_pedido, eh_imagem=eh_imagem)
+                        if not br.eh_extracao_vazia_criticamente(ia_raw_alt):
+                            log.info(sanitize_emoji("  │  ✓ Rotação alternativa produziu extração melhor. Adotada."))
+                            ia_raw = ia_raw_alt
+                            base64_conteudo = conteudo_alt
+                            r["base64_conteudo"] = base64_conteudo
+
                 ia_raw = self._escalar_para_altissimo_se_vazio(ia_raw, base64_conteudo, eh_imagem, nome)
                 r["ia_raw"] = ia_raw
                 log.info(sanitize_emoji("  │  ✓ Extração primária concluída"))
