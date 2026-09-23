@@ -231,6 +231,16 @@ Classificação de `tipoDocFiscal`:
    contêm a palavra "Goiânia" no nome, mas são cidades DIFERENTES, NUNCA geram "NFS-EG" - por
    exemplo "Aparecida de Goiânia", "Goianésia" e "Goianira" são municípios distintos de Goiânia.
    Ler o nome do município do prestador por completo, com atenção, antes de classificar.
+   ARMADILHA CONHECIDA - layout nacional DANFSe v2.0 (caso real pedido 104/nota 207, 23/09/2026):
+   nesse layout, o município do prestador aparece no bloco "PRESTADOR / FORNECEDOR", campo
+   "Município / Sigla UF" (não confundir com o campo "Município" isolado do cabeçalho superior
+   nem com "Local da Prestação"/"Município Incidência" da seção de tributação municipal - todos
+   podem coincidir em "Goiânia / GO", mas o que decide a classificação é sempre o campo dentro do
+   bloco do PRESTADOR). Exemplo real: prestador "Kings Cross Capital Ltda", bloco PRESTADOR /
+   FORNECEDOR mostra "Município / Sigla UF: Goiânia / GO" e "Simples Nacional na Data de
+   Competência: Não Optante" (nome com sufixo "Ltda", claramente NÃO é MEI). Classificação
+   obrigatória: `"tipoDocFiscal": "NFS-EG"` (nunca "NFS-E" neste caso - a IA já errou isso uma vez
+   classificando como "NFS-E", apesar do prestador ser inequivocamente de Goiânia e não-MEI).
 6. Nota Fiscal de Serviços de outro município (inclusive Aparecida de Goiânia, Goianésia,
    Goianira e qualquer município que não seja exatamente "Goiânia"): "NFS-E".
 7. Nota Fiscal de Serviço de Telecomunicação: "NFSTE".
@@ -616,6 +626,26 @@ Outros tributos retidos:
    do rótulo "Detalhamento dos Tributos" - foi exatamente esse layout que causou PIS/COFINS/CSLL
    zerados por engano no pedido 6485/nota 22407 (23/09/2026), lançado no Mega com esses 3 tributos
    incorretamente como "0.00" quando os valores reais eram 58,78 / 271,30 / 90,43.
+
+5. ARMADILHA CONHECIDA - layout nacional DANFSe v2.0 (Documento Auxiliar da NFS-e, padrão da
+   reforma tributária, seção "TRIBUTAÇÃO FEDERAL (EXCETO CBS)" - caso real pedido 104/nota 207,
+   23/09/2026): esse layout traz PIS, COFINS e CSLL em rótulos diferentes do padrão usado em
+   outras seções, e é fácil mapear errado:
+   - "PIS – Débito Apuração Própria" → mapear para `valorPIS` (e `basePIS`/`percentualPIS` se
+     houver base/alíquota explícita).
+   - "COFINS – Débito Apuração Própria" → mapear para `valorCOFINS` E `valorCofins` (as duas
+     chaves, ver nota sobre `valorCOFINS` x `valorCofins` mais abaixo) (e `baseCofins`/
+     `percentualCofins` se houver base/alíquota explícita).
+   - "Contribuições Sociais – Retidas" → mapear para `totalCSLL` e `valorCSLL` (é o valor de CSLL
+     retida, independente do texto de descrição ao lado, ex.: "Descrição Contrib. Sociais –
+     Retidas: PIS/COFINS Retido" - esse texto descritivo NÃO redireciona o valor para PIS/COFINS,
+     o campo em si é sempre CSLL neste layout).
+   - Exemplo real (pedido 104/nota 207): tabela mostra "IRRF: -", "Contribuição Previdenciária –
+     Retida: -", "Contribuições Sociais – Retidas: R$5,27" (linha 1); "PIS – Débito Apuração
+     Própria: R$3,42", "COFINS – Débito Apuração Própria: R$15,80", "Descrição Contrib. Sociais –
+     Retidas: PIS/COFINS Retido" (linha 2). JSON obrigatório para PIS/COFINS/CSLL neste caso:
+     `"valorPIS": "3.42", "valorCOFINS": "15.80", "valorCofins": "15.80", "totalCSLL": "5.27",
+     "valorCSLL": "5.27"` - os 3 valores são preenchidos, nenhum fica zerado.
 
 Valor total do documento e Valores de Mercadoria/Bases:
 1. Para `valorTotalDocumento`, usar o valor total bruto do documento fiscal principal, EXCETO nos

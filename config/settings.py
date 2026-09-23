@@ -117,6 +117,12 @@ class Settings(BaseModel):
     # resolvida na origem.
     tolerancia_dias_cond_pagto: int = int(os.getenv("TOLERANCIA_DIAS_COND_PAGTO", "1") or "0")
 
+    # PALIATIVO PROVISÓRIO DE TESTE (ver docs/REGRAS_PROJETO.md secao 3.24): liga/desliga a
+    # Validacao 6 (Condicao de Pagamento <= 7 dias). True = bloqueio ativo (comportamento padrao,
+    # bloqueia lancamento e manda para tratativa manual). False = desativa o bloqueio (documento
+    # com condicao <= 7 dias lanca normalmente) - usar apenas durante periodo de teste explicito.
+    bloqueio_cond_pagto_7dias_ativo: bool = _bool(os.getenv("BLOQUEIO_COND_PAGTO_7DIAS_ATIVO", "true"))
+
     @property
     def filtro_pedidos_list(self) -> list[int]:
         """Filtro por PDC_IN_CODIGO (equivalente ao 'Matriz do filtro' do fluxo).

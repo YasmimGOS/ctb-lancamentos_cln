@@ -1353,6 +1353,104 @@ chave.
   seção 3.23 (extração/prompt) está resolvida; o problema restante de exibição no Mega é outro,
   registrado separadamente na 3.8.
 
+### 3.24 Paliativo provisório de teste: desativar bloqueio da Validação 6 (Cond. Pagamento ≤ 7 dias) (23/09/2026)
+
+- **Gatilho:** pedido 104 (fornecedor Kings Cross Capital Ltda, CNPJ 28.201.368/0001-37, DANFSe
+  v2.0) bloqueado pela Validação 6 - condição de pagamento "07D" (vencimento em 7 dias da emissão,
+  18/09/2026), regra documentada na seção 2.4/3.5 que bloqueia qualquer condição em dias ≤ 7
+  (única exceção cadastrada: CNPJ do Aluguel IR). A usuária (rpa@odilonsantos.com) pediu para
+  conseguir realizar esse lançamento, "nem que seja a caráter de teste".
+- **Implementação:**
+  1. `config/settings.py::bloqueio_cond_pagto_7dias_ativo` - novo campo, lido de
+     `BLOQUEIO_COND_PAGTO_7DIAS_ATIVO` (default `true` = comportamento original preservado).
+  2. `config/.env::BLOQUEIO_COND_PAGTO_7DIAS_ATIVO=False` - desativado a caráter de teste em
+     23/09/2026.
+  3. `controllers/lancamento_controller.py` (Validação 6) - quando a flag está `False`, pula a
+     checagem inteira (loga aviso e segue direto para a Validação 7). Com a flag em `true`
+     (default), o comportamento é idêntico ao anterior - retrocompatível.
+- **PALIATIVO PROVISÓRIO - remover/ajustar quando:** a usuária pediu isso explicitamente "a
+  caráter de teste" - não é uma decisão definitiva de negócio. Voltar
+  `BLOQUEIO_COND_PAGTO_7DIAS_ATIVO=True` no `config/.env` assim que o teste terminar, restaurando o
+  bloqueio original de condição de pagamento ≤ 7 dias para todos os pedidos.
+- **Atenção:** enquanto essa flag estiver `False`, TODOS os pedidos com condição de pagamento ≤ 7
+  dias lançam automaticamente (não é uma exceção pontual do pedido 104) - inclusive casos que a
+  regra original foi criada para pegar (ver seção 2.4/3.5 para o motivo original do bloqueio).
+
+### 3.25 PIS/COFINS/CSLL mapeados errado em layout novo DANFSe v2.0 - CORRIGIDO (23/09/2026)
+
+> **Nova classe de bug** (diferente das seções 3.18/3.23, que eram sobre tabela de tributos em
+> duas linhas do portal issnetonline.com.br/goiania) - dessa vez é o layout nacional **DANFSe
+> v2.0** (Documento Auxiliar da NFS-e, padrão da reforma tributária), que tem uma seção
+> "TRIBUTAÇÃO FEDERAL (EXCETO CBS)" com rótulos de PIS/COFINS/CSLL diferentes do padrão usado em
+> outras seções, e a IA mapeou errado na primeira tentativa.
+
+- **Gatilho:** pedido 104/nota 207 (Kings Cross Capital Ltda → Visão Commercial Properties S/A)
+  lançado **duas vezes** com PIS/COFINS/CSLL incorretos:
+  - Transação **8693974** (17:15): raiz `valorPIS="5.27"`, `valorCOFINS="0.00"`; item
+    `valorPIS="5.27"`, `valorCofins="15.80"` (raiz e item inconsistentes entre si) e
+    `valorCSLL="0.00"`.
+  - Transação **8694275** (após uma primeira tentativa de correção, ainda errada): `valorPIS="0.00"`,
+    `valorCOFINS="0.00"`, `totalCSLL="5.27"`.
+- **Causa raiz confirmada** (PDF conferido, usuária confirmou a interpretação contábil correta
+  após duas rodadas de correção): o documento tem, na seção "TRIBUTAÇÃO FEDERAL (EXCETO CBS)":
+  - `IRRF: -` | `Contribuição Previdenciária – Retida: -` | `Contribuições Sociais – Retidas:
+    R$5,27`
+  - `PIS – Débito Apuração Própria: R$3,42` | `COFINS – Débito Apuração Própria: R$15,80` |
+    `Descrição Contrib. Sociais – Retidas: PIS/COFINS Retido`
+  **Mapeamento correto confirmado pela usuária:** os TRÊS valores são preenchidos, nenhum fica
+  zerado - `"PIS – Débito Apuração Própria" → valorPIS = "3.42"`, `"COFINS – Débito Apuração
+  Própria" → valorCOFINS/valorCofins = "15.80"`, `"Contribuições Sociais – Retidas" → totalCSLL/
+  valorCSLL = "5.27"` (o texto de descrição "PIS/COFINS Retido" ao lado desse último campo NÃO
+  redireciona o valor para PIS/COFINS - o campo em si é sempre CSLL neste layout).
+- **Histórico da correção (registrado para não repetir o erro):** a primeira hipótese testada foi
+  que "Débito Apuração Própria" seria só informativo (nunca retenção, ficaria "0.00") - essa
+  hipótese estava **errada** e foi corrigida pela usuária depois do segundo lançamento (transação
+  8694275) ainda ter saído incorreto.
+- **Correção final aplicada:** `prompts/prompt_1a_ia.txt`, item 5 da seção "Outros tributos
+  retidos", reescrito para mapear diretamente: "PIS – Débito Apuração Própria" → `valorPIS`;
+  "COFINS – Débito Apuração Própria" → `valorCOFINS` e `valorCofins`; "Contribuições Sociais –
+  Retidas" → `totalCSLL`/`valorCSLL`.
+- **Pendência URGENTE (correção manual no Mega):** AMBAS as transações do pedido 104/nota 207
+  precisam correção - `valorPIS="3.42"`, `valorCOFINS="15.80"`, `totalCSLL="5.27"` (raiz e item):
+  - Transação **8693974** (17:15) - valores completamente errados.
+  - Transação **8694275** (17:15, segunda tentativa) - PIS/COFINS zerados, só CSLL certo.
+  Somar à lista de pendências de correção manual já existente (seções 3.10, 3.12, 3.15, 3.17,
+  3.18, 3.23). Essas duas transações também são um lançamento **duplicado** do mesmo documento
+  (nota 207) - ver seção 3.21/3.24 sobre `IGNORAR_JA_PROCESSADO_TESTE`, provavelmente só uma delas
+  deve permanecer no Mega após a correção.
+- **Achado à parte, ainda válido (não é sobre extração):** ao testar a transação 8694275 (com
+  CSLL=5,27 corretamente enviado), a tela "Gerar Parcelas → Impostos" do Mega mostrou "Valor CSLL:
+  0,00" mesmo assim - CSLL não tem nenhum campo de situação tributária (CST) no schema da API do
+  Mega (confirmado com o schema completo, diferente de PIS/COFINS que têm `sitTribPIS`/
+  `sitTribCofins`). Isso é consistente com a reclamação original de julho (seção 3.8: "a CSLL vai
+  pro agente 20 em vez do agente consolidador 505") - **CSLL parece ter um problema de
+  roteamento/exibição no Mega independente do payload estar correto**, sem campo adicional
+  disponível no schema para tentar corrigir isso do nosso lado.
+- **Pendência de confirmação:** aguardando reprocessamento de uma nota com esse mesmo layout
+  DANFSe v2.0 (seção "TRIBUTAÇÃO FEDERAL (EXCETO CBS)") para confirmar que o mapeamento final em
+  `prompt_1a_ia.txt` está correto, seguindo o mesmo padrão de confirmação usado nas seções
+  3.15/3.17/3.18/3.23. Como esse é um layout nacional novo (reforma tributária), é esperado que
+  apareça em mais documentos de outros prestadores/municípios no futuro.
+
+### 3.26 tipoDocFiscal errado (NFS-E em vez de NFS-EG) no mesmo layout DANFSe v2.0 - CORRIGIDO (23/09/2026)
+
+- **Gatilho:** mesmo pedido 104/nota 207 (Kings Cross Capital Ltda) - a IA classificou
+  `tipoDocFiscal` como `"NFS-E"`, mas o prestador é de Goiânia (capital), não MEI, então deveria
+  ser `"NFS-EG"` pela regra já existente no prompt (seção "Classificação de `tipoDocFiscal`",
+  regra 5). A regra em si estava correta - foi um erro pontual de leitura da IA nesse layout novo.
+- **Causa raiz:** no layout DANFSe v2.0, o município do prestador aparece no bloco "PRESTADOR /
+  FORNECEDOR", campo "Município / Sigla UF: Goiânia / GO" - junto com "Simples Nacional na Data
+  de Competência: Não Optante" (nome com sufixo "Ltda", não é MEI). Apesar de inequívoco, a IA
+  classificou errado como "NFS-E".
+- **Correção aplicada:** adicionado exemplo real (pedido 104/nota 207) à regra 5 de classificação
+  de `tipoDocFiscal` em `prompts/prompt_1a_ia.txt`, ancorando explicitamente no campo "Município /
+  Sigla UF" do bloco PRESTADOR/FORNECEDOR do layout DANFSe v2.0.
+- **Pendência URGENTE (correção manual no Mega):** as transações 8693974 e 8694275 (pedido
+  104/nota 207) também saíram com `tipoDocFiscal="NFS-E"` incorreto (deveria ser "NFS-EG"), além
+  dos valores de PIS/COFINS/CSLL já registrados como pendência na seção 3.25.
+- **Pendência de confirmação:** aguardando reprocessamento de nota do mesmo layout/prestador de
+  Goiânia para confirmar a classificação correta como "NFS-EG".
+
 ---
 
 ## 4. Integracao IA (Claude)

@@ -1041,27 +1041,31 @@ class LancamentoController:
             return res
         log.info(sanitize_emoji("  │  ✓ Chave de acesso válida (ou não exigida para este tipo de documento)"))
 
-        # Validação: Condição de Pagamento ≤ 7 dias
-        log.info("  ├─ Validação 6: Condição de Pagamento ≤ 7 dias...")
-        log.info("  │  ├─ Data Documento: %s", contexto["data_documento"])
-        log.info("  │  ├─ Cond. Pagamento: %s", contexto["cond_pagto"])
-        log.info("  │  └─ Bloqueio 7d (item): %s", contexto["bloqueia_7d"])
-        deve_por_venc = br.calcular_deve_lancar_por_vencimento(
-            contexto["cnpj_emitente"], contexto["data_documento"], contexto["cond_pagto"], self.s.timezone)
-        if contexto["bloqueia_7d"] or not deve_por_venc:
-            log.warning(sanitize_emoji("  │  ⚠️  Condição de pagamento ≤ 7 dias - bloqueio ativado"))
-            msg = "Condição de pagamento ≤ 7 dias. Lançamento bloqueado"
-            detalhes = {
-                "Data do documento": contexto["data_documento"],
-                "Condição de pagamento": contexto["cond_pagto"]
-            }
-            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
-            # Registrar no BD como sucesso para não reprocessar
-            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd, erro="Motivo: Condição de pagamento ≤ 7")
-            res.deve_lancar = False
-            res.status = "CondPagto7Dias"
-            log.info("  └─ Status final: %s (registrado no BD)", res.status)
-            return res
+        # Validação 6: Condição de Pagamento ≤ 7 dias
+        if not self.s.bloqueio_cond_pagto_7dias_ativo:
+            log.info("  ├─ Validação 6: Cond. Pagamento ≤ 7 dias - paliativo DESATIVADO "
+                     "(BLOQUEIO_COND_PAGTO_7DIAS_ATIVO=False no .env), pulando")
+        else:
+            log.info("  ├─ Validação 6: Condição de Pagamento ≤ 7 dias...")
+            log.info("  │  ├─ Data Documento: %s", contexto["data_documento"])
+            log.info("  │  ├─ Cond. Pagamento: %s", contexto["cond_pagto"])
+            log.info("  │  └─ Bloqueio 7d (item): %s", contexto["bloqueia_7d"])
+            deve_por_venc = br.calcular_deve_lancar_por_vencimento(
+                contexto["cnpj_emitente"], contexto["data_documento"], contexto["cond_pagto"], self.s.timezone)
+            if contexto["bloqueia_7d"] or not deve_por_venc:
+                log.warning(sanitize_emoji("  │  ⚠️  Condição de pagamento ≤ 7 dias - bloqueio ativado"))
+                msg = "Condição de pagamento ≤ 7 dias. Lançamento bloqueado"
+                detalhes = {
+                    "Data do documento": contexto["data_documento"],
+                    "Condição de pagamento": contexto["cond_pagto"]
+                }
+                self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+                # Registrar no BD como sucesso para não reprocessar
+                self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd, erro="Motivo: Condição de pagamento ≤ 7")
+                res.deve_lancar = False
+                res.status = "CondPagto7Dias"
+                log.info("  └─ Status final: %s (registrado no BD)", res.status)
+                return res
         log.info(sanitize_emoji("  │  ✓ Condição de pagamento válida (> 7 dias)"))
 
         # Validação: Condição de Pagamento x Vencimento do Boleto
