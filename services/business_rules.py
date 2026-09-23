@@ -262,12 +262,18 @@ def calcular_cond_pagto_por_vencimento(data_documento_br: str, data_vencimento_b
 
 
 def valida_cond_pagto_por_vencimento(cond_pagto_raw: str, data_documento_br: str,
-                                      data_vencimento_boleto_br: str) -> tuple[bool, str]:
+                                      data_vencimento_boleto_br: str,
+                                      tolerancia_dias: int = 0) -> tuple[bool, str]:
     """Confere se a condição de pagamento do pedido bate com o vencimento do boleto anexado.
 
     Pula a validação (retorna ok=True) quando não há boleto com vencimento extraído, ou quando a
     condição de pagamento é um código especial sem contagem de dias (ADIANT, CREDITO, etc.) -
     nesses casos o robo confia no cadastro do pedido, sem bloquear por falta de dado.
+
+    `tolerancia_dias` (PALIATIVO PROVISÓRIO, ver docs/REGRAS_PROJETO.md seção 3.21 e
+    config/settings.py::tolerancia_dias_cond_pagto): permite aceitar uma diferença de até N dias
+    entre a condição cadastrada e a calculada pelo vencimento do boleto, além da correspondência
+    exata. Default 0 = comportamento original (só aceita correspondência exata).
     """
     if not str(data_vencimento_boleto_br or "").strip():
         return True, ""
@@ -279,7 +285,8 @@ def valida_cond_pagto_por_vencimento(cond_pagto_raw: str, data_documento_br: str
         return True, ""
     # Compara pela quantidade de dias (int), não pela string formatada: "8D" e "08D" são a
     # mesma condição de pagamento, só com zero à esquerda diferente (ver docs/REGRAS_PROJETO.md).
-    ok = quantidade_cond_pagto(esperada) == quantidade_cond_pagto(cond_norm)
+    diferenca_dias = abs(quantidade_cond_pagto(esperada) - quantidade_cond_pagto(cond_norm))
+    ok = diferenca_dias <= max(0, tolerancia_dias)
     return ok, esperada
 
 

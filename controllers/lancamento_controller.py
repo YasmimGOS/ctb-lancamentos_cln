@@ -234,18 +234,27 @@ class LancamentoController:
         # ═══════════════════════════════════════════════════════════════════
         # VERIFICAÇÃO INICIAL: Consultar se pedido já foi processado
         # ═══════════════════════════════════════════════════════════════════
-        log.info(sanitize_emoji("[VERIFICAÇÃO PRÉVIA] 🔍 Consultando se pedido %s já foi processado no BD..."), num_pedido_bd)
-        try:
-            registros_bd = self.bpms.consultar_bd(num_pedido_bd)
-            if registros_bd:
-                log.info(sanitize_emoji("  ⏭️  Pedido %s já consta no BD. Pulando processamento."), num_pedido_bd)
-                res.status = "JaProcessado"
-                res.deve_lancar = False
-                log.info("  └─ Status final: %s", res.status)
-                return [res]
-            log.info(sanitize_emoji("  ✓ Pedido não encontrado no BD. Prosseguindo com processamento."))
-        except Exception as exc:  # noqa: BLE001
-            log.exception(sanitize_emoji("  ⚠️  Erro ao consultar BD para pedido %s: %s. Prosseguindo mesmo assim."), num_pedido_bd, exc)
+        ignora_ja_processado = (
+            self.s.ignorar_ja_processado_teste
+            and self.s.codigo_teste.strip()
+            and str(pdc) == self.s.codigo_teste.strip()
+        )
+        if ignora_ja_processado:
+            log.info(sanitize_emoji("[VERIFICAÇÃO PRÉVIA] ⚠️  IGNORAR_JA_PROCESSADO_TESTE ativo para o pedido de teste "
+                                    "%s - pulando checagem de 'já processado no BD'."), num_pedido_bd)
+        else:
+            log.info(sanitize_emoji("[VERIFICAÇÃO PRÉVIA] 🔍 Consultando se pedido %s já foi processado no BD..."), num_pedido_bd)
+            try:
+                registros_bd = self.bpms.consultar_bd(num_pedido_bd)
+                if registros_bd:
+                    log.info(sanitize_emoji("  ⏭️  Pedido %s já consta no BD. Pulando processamento."), num_pedido_bd)
+                    res.status = "JaProcessado"
+                    res.deve_lancar = False
+                    log.info("  └─ Status final: %s", res.status)
+                    return [res]
+                log.info(sanitize_emoji("  ✓ Pedido não encontrado no BD. Prosseguindo com processamento."))
+            except Exception as exc:  # noqa: BLE001
+                log.exception(sanitize_emoji("  ⚠️  Erro ao consultar BD para pedido %s: %s. Prosseguindo mesmo assim."), num_pedido_bd, exc)
 
         # ═══════════════════════════════════════════════════════════════════
         # VERIFICAÇÃO PRÉVIA: Fornecedor com fatura fora do padrão (execução manual)
@@ -348,6 +357,18 @@ class LancamentoController:
         payloads: list[dict] = []
         contexto: dict[str, Any] = {}
         anexos_protegidos: list[str] = []
+
+        # Falha ao enviar um anexo para a IA (ex.: erro transitório 401/5xx do serviço) só é
+        # avisada no Teams se, no fim, o pedido não conseguir ser lançado - se outro anexo do
+        # mesmo pedido (NF ou boleto) resolver o lançamento mesmo assim, a falha pontual não gera
+        # ruído (a pedido da usuária: erro que não trava o processo não precisa ser postado).
+        avisos_ia_envio_pendentes: list[str] = []
+
+        def _flush_avisos_ia_envio(lancou_com_sucesso: bool) -> None:
+            if lancou_com_sucesso:
+                return
+            for nome_pendente in avisos_ia_envio_pendentes:
+                self.teams.erro_ia_envio(pdc, nome_pendente)
 
         # Tier de modelo da IA: sempre "medio" (padrão, mais barato). O tier "altissimo" (o mais
         # caro) nunca é escolhido aqui - só entra como retry único quando a extração vem vazia (ver
@@ -482,7 +503,7 @@ class LancamentoController:
                     r["protegido"] = True
                 else:
                     log.exception(sanitize_emoji("  │  ❌ Erro ao enviar Base64 para IA (pedido %s): %s"), pdc, exc)
-                    self.teams.erro_ia_envio(pdc, nome)
+                    avisos_ia_envio_pendentes.append(nome)
             log.info("  └─")
 
         # ───────────────────────────────────────────────────────────────────
@@ -769,6 +790,7 @@ class LancamentoController:
                 res.deve_lancar = False
                 res.status = status_erro
                 log.info("  └─ Status final: %s", res.status)
+                _flush_avisos_ia_envio(False)
                 return [res]
 
         # ═══════════════════════════════════════════════════════════════════
@@ -805,11 +827,13 @@ class LancamentoController:
                 res.deve_lancar = False
                 res.status = "SenhaProtegidaManual"
                 log.info("  └─ Status final: %s (registrado no BD)", res.status)
+                _flush_avisos_ia_envio(False)
                 return [res]
             log.error(sanitize_emoji("  ❌ Nenhum payload válido gerado"))
             self.teams.erro_definir_payload(pdc)
             res.status = "SemPayload"
             log.info("  └─ Status final: %s", res.status)
+            _flush_avisos_ia_envio(False)
             return [res]
 
         # Boletos anexos ao pedido (cada um pode ser uma parcela real do pagamento rateado)
@@ -837,6 +861,7 @@ class LancamentoController:
                                            nome_filial_pedido)
             for payload in payloads_para_lancar
         ]
+        _flush_avisos_ia_envio(any(r.lancado for r in resultados))
         return resultados
 
     def _validar_e_lancar_payload(self, payload: dict, pdc: Any, filial: Any, cnpj_forn: str,
@@ -1042,7 +1067,8 @@ class LancamentoController:
         # Validação: Condição de Pagamento x Vencimento do Boleto
         log.info("  ├─ Validação 7: Condição de Pagamento x Vencimento do Boleto...")
         cond_ok, cond_esperada = br.valida_cond_pagto_por_vencimento(
-            contexto["cond_pagto"], contexto["data_documento"], data_vencimento_boleto)
+            contexto["cond_pagto"], contexto["data_documento"], data_vencimento_boleto,
+            tolerancia_dias=self.s.tolerancia_dias_cond_pagto)
         if not cond_ok:
             log.warning(sanitize_emoji("  │  ⚠️  Condição de pagamento divergente do vencimento do boleto - bloqueio ativado"))
             msg = "Condição de pagamento do pedido não confere com o vencimento do boleto anexado"

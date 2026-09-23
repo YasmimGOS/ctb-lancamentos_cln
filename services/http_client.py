@@ -80,6 +80,12 @@ def request_json(method: str, url: str, *, headers: dict[str, str] | None = None
             # Log da response (detalhado)
             log.info("HTTP RESPONSE | Status: %s | Tempo: %.2fs", response.status_code, duracao)
 
+            if response.status_code >= 500 and tentativa < tentativas:
+                log.warning("Resposta 5xx (%s/%s) em %s: status %s. Aguardando %ss antes de tentar novamente...",
+                            tentativa, tentativas, url, response.status_code, intervalo_s)
+                time.sleep(intervalo_s)
+                continue
+
             # Tentar parsear response body
             try:
                 response_data = response.json() if response.content else None

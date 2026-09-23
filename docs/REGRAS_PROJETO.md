@@ -294,7 +294,7 @@ chave.
 - **Pendente:** nota 19 (transacao Mega 7891049) ja lancada e provavelmente precisa de
   correcao manual/estorno pela Controladoria, independente da causa raiz ainda nao confirmada.
 
-### 3.8 Campos ausentes na raiz do payload - EM TESTE (16/07/2026)
+### 3.8 Campos ausentes na raiz do payload - HIPÓTESE REFUTADA, bug confirmado como sendo do Mega Integrador (23/09/2026)
 
 > **Contexto:** time fiscal confirmou que a tributacao do item esta correta (PIS/COFINS/CSLL
 > calculados certinho, ver print "Informacoes da Tributacao no Documento"), mas na aba
@@ -327,6 +327,23 @@ chave.
   "1500.00"`, mas o codigo atual retorna "1530.00" porque reconstitui o bruto somando o ISS
   retido ao liquido para documentos de servico) - nao mexi nisso agora por estar fora do escopo
   desta investigacao, mas fica registrado para quem for revisar os testes depois.
+- **CONFIRMAÇÃO (23/09/2026, pedido 6485/nota 22407, transação Mega 8689534):** os 4 campos
+  vazios continuam no payload há 2 meses (`valorMercadoriaEmpenhada`, `tragnCodigo`, `tipoTrans`,
+  `icmsStreRecupera`) e o payload foi conferido enviando PIS=58.78/COFINS=271.30/CSLL=90.43
+  corretos, tanto na raiz quanto no item (ver seção 3.23). Prints reais do Mega mostram:
+  - Tela **"Totais do Documento"**: Valor do PIS = 0,00, Valor do COFINS = 0,00, Valor do CSLL =
+    0,00 (zerados, apesar do payload correto).
+  - Tela **"Gerar Parcelas → Impostos"**: Valor PIS = 58,78, Valor COFINS = 271,30, Valor CSLL =
+    90,43 - **corretos**, batendo exatamente com o que foi enviado.
+  - O ISS (mesma arquitetura raiz+item, mesmo payload) aparece certo **nas duas telas** (452,17
+    devido e retido em "Totais do Documento" também).
+  **Conclusão: a hipótese dos 4 campos vazios está REFUTADA** - não resolve a agregação de
+  PIS/COFINS/CSLL na tela "Totais do Documento". Como o Mega recebeu e processou os valores
+  corretamente (prova: tela de Parcelas/Impostos correta) mas não os agrega nessa tela específica,
+  e ISS (estrutura idêntica) funciona nas duas telas, esse é um comportamento do **Mega
+  Integrador/ERP em si**, não um problema de payload/pipeline do RPA. **Não continuar tentando
+  resolver isso por ajuste de payload** - escalar para quem administra o Mega (fiscal/TI Mega)
+  como um bug de agregação específico de PIS/COFINS/CSLL na tela de Totais do Documento.
 
 ### 3.9 valorMercadoria (bruto) de servico: preferir o pedido de compra, nao reconstruir por tributos (17/07/2026)
 
@@ -1150,6 +1167,173 @@ chave.
   usam o tier "medio" (`MODEL_TIER_PADRAO`) por padrão. `MODEL_TIER_ALTISSIMO` foi mantido (retry
   único quando a extração vem vazia, não é escolha por fornecedor - ver
   `_escalar_para_altissimo_se_vazio`).
+
+### 3.21 Paliativo provisório: tolerância de dias na Validação 7 (Cond.Pagto x Boleto) (23/09/2026)
+
+- **Gatilho:** pedido 6485 bloqueado pela Validação 7 - condição de pagamento cadastrada "38D",
+  condição calculada pelo vencimento do boleto anexado "37D" (data do documento 03/09/2026,
+  vencimento do boleto 10/10/2026 = 37 dias corridos). Diferença de apenas 1 dia, mas a Validação 7
+  exigia igualdade exata da quantidade de dias (seção 3.19), então bloqueou o lançamento
+  (`CondPagtoDivergente`).
+- **Decisão do usuário (rpa@odilonsantos.com):** liberar uma tolerância de dias configurável para
+  poder testar por alguns dias, aumentando o valor aos poucos conforme necessário - não é uma
+  liberação pontual apenas do pedido 6485, e sim uma regra geral temporária que vale para todos os
+  pedidos processados enquanto a tolerância estiver ativa.
+- **Implementação:**
+  1. `config/settings.py::tolerancia_dias_cond_pagto` - novo campo, lido de
+     `TOLERANCIA_DIAS_COND_PAGTO` (default `1`).
+  2. `config/.env::TOLERANCIA_DIAS_COND_PAGTO=1` - valor inicial em produção/teste.
+  3. `services/business_rules.py::valida_cond_pagto_por_vencimento` - novo parâmetro
+     `tolerancia_dias: int = 0`; a comparação passou de igualdade exata
+     (`quantidade_cond_pagto(esperada) == quantidade_cond_pagto(cond_norm)`) para diferença
+     absoluta tolerada (`abs(esperada - cond_norm) <= tolerancia_dias`). Com `tolerancia_dias=0` o
+     comportamento é idêntico ao anterior (retrocompatível).
+  4. `controllers/lancamento_controller.py` (Validação 7) - passa
+     `tolerancia_dias=self.s.tolerancia_dias_cond_pagto` na chamada.
+- **PALIATIVO PROVISÓRIO - remover/ajustar quando:** a usuária avisou que vai pedir para remover ou
+  reduzir essa tolerância quando terminar o período de teste ou quando a causa raiz da divergência
+  entre a condição cadastrada no pedido e o vencimento do boleto for resolvida na origem. Até lá,
+  ela mesma vai aumentando `TOLERANCIA_DIAS_COND_PAGTO` no `config/.env` conforme necessário, sem
+  precisar de nova alteração de código.
+- **Nota (correção):** a nota original dizia que "bastava reprocessar" o pedido 6485, mas isso
+  estava incompleto - a verificação prévia de "já processado no BD"
+  (`controllers/lancamento_controller.py::processar_pedido`, logo no início) pula QUALQUER pedido
+  que já tenha registro em `consultar_bd`, independente do status. Como o 6485 já tinha sido
+  registrado como `"Sucesso"`/`CondPagtoDivergente` antes da tolerância entrar em vigor, ele
+  continuava sendo pulado como `JaProcessado` mesmo com a Validação 7 já corrigida. Não existe
+  endpoint de exclusão/atualização de registro na API BPMS usada aqui (`services/
+  integra_bpms_service.py` só tem `registrar`/`consultar_bd`, sem delete/update).
+- **Segundo paliativo provisório (23/09/2026), para permitir reprocessar o pedido de teste:**
+  1. `config/settings.py::ignorar_ja_processado_teste` - novo campo, lido de
+     `IGNORAR_JA_PROCESSADO_TESTE` (default `false`).
+  2. `config/.env::IGNORAR_JA_PROCESSADO_TESTE=True` - ativo durante o período de teste.
+  3. `controllers/lancamento_controller.py::processar_pedido` - quando
+     `ignorar_ja_processado_teste=True` E o pedido processado é igual a `CODIGO_TESTE`, pula a
+     chamada a `consultar_bd` inteira (loga aviso e segue direto para o processamento normal, que
+     ainda registra no BD ao final normalmente). Fora dessas duas condições (flag desligada ou
+     pedido diferente de `CODIGO_TESTE`), o comportamento é idêntico ao anterior - nunca afeta
+     produção normal.
+- **Remover/ajustar quando:** junto com a tolerância acima, quando o período de teste terminar -
+  voltar `IGNORAR_JA_PROCESSADO_TESTE=False` no `config/.env`. Se algum outro pedido (fora de
+  teste) precisar ser reprocessado depois de já ter registro no BD, a única forma hoje é pedir para
+  a TI remover a linha diretamente na tabela do BPMS (não há endpoint de exclusão exposto ao RPA).
+
+### 3.22 Robustez de rede na obtenção da lista de pedidos + Teams silencioso para falha de IA não crítica (23/09/2026)
+
+- **Gatilho 1:** usuária relatou oscilações na URL `https://integra.odilonsantos.com/api/Bpms/pedanexorpa`
+  (às vezes demora alguns segundos para voltar a responder). Antes desta correção,
+  `services/integra_bpms_service.py::obter_lista_pedidos` chamava `request_json` com os valores
+  default (`tentativas=1`), então qualquer timeout, erro de conexão OU resposta 5xx passageira
+  abortava o lote inteiro na primeira tentativa (`controllers/lancamento_controller.py::executar_lote`
+  loga erro, dispara aviso no Teams e retorna `[]` sem processar nenhum pedido daquele disparo).
+- **Correção 1:**
+  1. `services/http_client.py::request_json` - agora também faz retry quando a resposta HTTP vem
+     com status `>= 500` (antes só reagia a `requests.RequestException`, isto é, erro de
+     conexão/timeout; resposta 5xx "normal" não disparava retry).
+  2. `services/integra_bpms_service.py::obter_lista_pedidos` - passou a chamar `request_json` com
+     `tentativas=3, intervalo_s=10` (antes usava o default sem retry nenhum). Só essa chamada foi
+     alterada - as demais chamadas a `request_json` no projeto continuam com o comportamento
+     default, sem necessidade identificada de retry até o momento.
+- **Gatilho 2 (achado ao validar a correção 3.21 em produção):** ao reprocessar o pedido 6485 com
+  `IGNORAR_JA_PROCESSADO_TESTE=True`, um dos 2 anexos do pedido (`N0000049424491I5895229.pdf`)
+  falhou a extração primária com `401 Unauthorized` (`"Invalid API key"`) da API de IA - um erro
+  transitório (a mesma chave funcionou no health-check segundos antes e em todas as outras
+  chamadas do mesmo disparo). Como o outro anexo já tinha sido lido com sucesso como documento
+  principal (`tipoDocFiscal=NFS-EG`), o pipeline não tentou reler o anexo que falhou (a lógica de
+  releitura em `processar_pedido` só dispara quando NENHUM anexo virou documento principal ainda -
+  ver seção "Decisão" no código, por volta da linha 504). O pedido lançou normalmente com sucesso
+  (Transação Mega 8688424, nota 22407), mas o RPA ainda assim postou no Teams
+  `"❌ Falha ao enviar Base64 para IA"` para o anexo que falhou - mensagem que, neste caso, não
+  correspondia a nenhum problema real (o lançamento saiu correto), só ruído.
+- **Nota importante:** esse anexo que falhou (401 transitório) não foi reaproveitado como
+  possível boleto - se ele fosse o boleto do pedido, a Validação 7 (Cond.Pagto x Vencimento do
+  Boleto, seção 3.21) teria sido **pulada silenciosamente** por falta de dado de vencimento
+  (`valida_cond_pagto_por_vencimento` retorna `ok=True` quando não há boleto com vencimento
+  extraído), e não porque a tolerância de 1 dia entrou em ação. Ou seja: no pedido 6485 desta vez,
+  o lançamento passou por "fail-open" de dado ausente, não pela tolerância criada na seção 3.21 -
+  a tolerância ainda não foi comprovada em um caso real onde o boleto foi lido com sucesso e a
+  diferença de dias realmente caiu dentro da margem aceita.
+- **Decisão do usuário (rpa@odilonsantos.com):** "se o erro não parar o processo e conseguir
+  lançar, não precisa postar ou registrar a falha" - erros pontuais de anexo que acabam não
+  impedindo o lançamento do pedido não devem gerar aviso no Teams.
+- **Correção 2:** `controllers/lancamento_controller.py::processar_pedido` - a notificação Teams de
+  falha de envio de anexo para a IA (`self.teams.erro_ia_envio`) deixou de ser disparada na hora do
+  erro. Em vez disso, o nome do anexo é guardado em `avisos_ia_envio_pendentes` (lista local) e só é
+  efetivamente enviado ao Teams (via `_flush_avisos_ia_envio`) se, ao final do processamento
+  daquele pedido, NENHUM resultado tiver `lancado=True` (nenhum lançamento bem-sucedido no Mega).
+  Chamadas de flush foram adicionadas em todos os pontos de saída após a Fase 1 de extração
+  (Rota Verde com erro, `SenhaProtegidaManual`, `SemPayload`, e o retorno final com os resultados
+  reais de `_validar_e_lancar_payload`). Falhas de anexo protegido por senha
+  (`erro_anexo_protegido_senha`) e demais notificações Teams do restante do pipeline **não** foram
+  alteradas - continuam imediatas, só a falha específica de "enviar Base64 para IA" ficou
+  condicional ao resultado final.
+- **Nota:** essa mudança só afeta o AVISO no Teams; o log técnico completo do erro
+  (`log.exception`) continua sendo escrito normalmente no arquivo de log, então nada se perde para
+  fins de auditoria/depuração - só o alarme para a usuária é que passou a ser condicional.
+
+### 3.23 PIS/COFINS/CSLL zerados por engano (falso negativo) - mesma armadilha da tabela de tributos em duas linhas da seção 3.18, agora atingindo a extração primária - CORRIGIDO E CONFIRMADO (23/09/2026)
+
+> **Mesma classe de bug das seções 3.15/3.17/3.18** (tabela de tributos em duas linhas de 7
+> colunas, portal issnetonline.com.br/goiania) - a correção da 3.18 só foi aplicada em
+> `prompts/prompt_2a_ia.txt` (2ª chamada da IA, focada em ISS/`issRetido`). A 1ª chamada
+> (`prompts/prompt_1a_ia.txt`, que extrai PIS/COFINS/INSS/IRRF/CSLL) nunca recebeu o mesmo ajuste
+> para esse layout - por isso o ISS saía certo mas PIS/COFINS/CSLL continuavam saindo zerados
+> nesse tipo de documento.
+
+- **Gatilho:** usuária relatou "o valor do PIS e COFINS está saindo 0.00 na tela externa do Mega,
+  mas os detalhes de impostos mostram o valor correto" no lançamento do pedido 6485/nota 22407
+  (Elevadores Atlas Schindler, NFS-e de Goiânia, tomador Condomínio Shopping Center Cerrado -
+  mesmo tomador do caso original da seção 3.18).
+- **Causa raiz confirmada** (PDF `NF20260923T105853.096-000000021331-1-00028986000965.PDF`
+  conferido): a seção "Detalhamento dos Tributos" vem exatamente no mesmo layout de duas
+  linhas/7 colunas da seção 3.18:
+  - Linha 1: `Vl. Total dos Serviços | Desconto Incondicionado | Deduções Base Cálculo | Base de
+    Cálculo | Total do ISSQN | ISSQN Retido | Desconto Condicionado` =
+    `9.043,48 | 0,00 | 0,00 | 9.043,48 | 0,00 | Sim | 0,00`.
+  - Linha 2: `PIS | COFINS | INSS | IRRF | CSLL | Outras Retenções | Vl. ISSQN Retido | Vl.
+    Líquido da Nota Fiscal` = `58,78 | 271,30 | 0,00 | 0,00 | 90,43 | 0,00 | 452,17 | 8.170,80`.
+  O documento declara explicitamente "Responsável pela Retenção: Tomador" - PIS (58,78), COFINS
+  (271,30) e CSLL (90,43) são retenções reais, não valores meramente informativos. A 1ª chamada da
+  IA (`prompt_1a_ia.txt`) retornou `valorPIS`, `valorCOFINS`/`valorCofins` e `totalCSLL`/`valorCSLL`
+  todos como `"0.00"` - só a 2ª chamada (`prompt_2a_ia.txt`, já corrigida na seção 3.18) leu
+  corretamente `issRetido: true` e `valorISSRetido: "452.17"` da mesma linha 2.
+- **Confirmado que NÃO é bug de cálculo:** `services/etl_service.py` (raiz e item) processa
+  corretamente qualquer valor que a IA retorne - o problema é 100% de leitura/extração da IA nesse
+  layout específico, não de lógica de negócio. Comparação completa com o fluxo antigo (Power
+  Automate `LancamentoCLN_GoLive`) feita nesta mesma investigação não encontrou divergência de
+  cálculo relevante para este caso.
+- **Correção aplicada:** adicionado à seção "Outros tributos retidos" de `prompts/prompt_1a_ia.txt`
+  um exemplo real completo (item 4, com os números exatos desta nota - 58.78/271.30/90.43),
+  reproduzindo o mesmo layout de duas linhas/7 colunas já documentado na 3.18, agora instruindo a
+  1ª chamada a mapear corretamente PIS/COFINS/INSS/IRRF/CSLL da linha 2 para
+  `valorPIS`/`valorCOFINS`+`valorCofins`/`totalINSS`+`valorINSS`/`totalIRRF`+`valorIRFF`/
+  `totalCSLL`+`valorCSLL`, mesmo com "Total do ISSQN" da linha 1 em "0,00".
+- **Pendência URGENTE (correção manual no Mega):** o pedido 6485/nota 22407 foi lançado **duas
+  vezes** durante os testes desta sessão (transação **8688424** às 10:16 e transação **8689172**
+  às 10:55 - lançamento duplicado causado pelo paliativo `IGNORAR_JA_PROCESSADO_TESTE=True` da
+  seção 3.21, que permite reprocessar o mesmo pedido de teste sem checar o BD). As DUAS transações
+  saíram com PIS/COFINS/CSLL zerados (0.00 em vez de 58.78/271.30/90.43). Somam-se à lista de
+  pendências de correção manual já existente (seções 3.10, 3.12, 3.15, 3.17, 3.18). Recomendado:
+  desligar `IGNORAR_JA_PROCESSADO_TESTE` assim que o teste da tolerância (seção 3.21) for
+  encerrado, para não gerar novos lançamentos duplicados.
+- **Nota sobre o paliativo de bloqueio (seção 3.6):** `BLOQUEIO_PIS_COFINS_ATIVO` estava
+  `False` no `.env` no momento desses dois lançamentos - com o paliativo ativo (`True`), pedidos
+  com PIS/COFINS reconhecido não são lançados automaticamente (vão para manual), mas isso não
+  teria evitado este caso específico, porque a IA reconheceu **zero** PIS/COFINS (falso negativo),
+  não reconheceu valor algum para o paliativo bloquear.
+- **Confirmado em produção (23/09/2026, mesmo pedido 6485/nota 22407, transação Mega 8689534):**
+  reprocessado logo após o ajuste do prompt - a 1ª chamada da IA leu corretamente
+  `"valorPIS":"58.78"`, `"valorCOFINS":"271.30"`, `"totalCSLL":"90.43"` (com `basePIS`/`baseCofins`/
+  `baseCSLL` = "9043.48" e percentuais calculados automaticamente pelo `etl_service.py` como
+  0.65%/3.00%/1.00%). O payload enviado ao Mega já saiu com os 3 tributos corretos, tanto na raiz
+  quanto no item. **O ajuste em `prompt_1a_ia.txt` está confirmado e funcionando** - não precisa de
+  mais nenhuma mudança de prompt para este layout.
+- **Efeito colateral descoberto (não é bug de extração, é do Mega Integrador):** mesmo com o
+  payload 100% correto, a tela "Totais do Documento" do Mega mostrou PIS/COFINS/CSLL zerados,
+  enquanto a tela "Gerar Parcelas → Impostos" mostrou os valores corretos (58,78/271,30/90,43) -
+  ver detalhamento completo e conclusão na seção 3.8 (atualizada nesta mesma data). Ou seja: esta
+  seção 3.23 (extração/prompt) está resolvida; o problema restante de exibição no Mega é outro,
+  registrado separadamente na 3.8.
 
 ---
 

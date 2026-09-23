@@ -589,6 +589,34 @@ Outros tributos retidos:
 
 3. Não inferir retenção a partir de tributo apenas apurado se houver indicação de não retenção.
 
+4. ARMADILHA CONHECIDA - tabela de tributos em DUAS linhas de 7 colunas cada (caso real NFS-e de
+   Goiânia, portal issnetonline.com.br/goiania - mesmo layout documentado na regra de retenção do
+   ISS/ISSQN acima; ver pedido 5875/nota 1063 e pedido 6485/nota 22407): a seção "Detalhamento dos
+   Tributos" pode vir dividida assim:
+   - Linha 1 (7 colunas): Vl. Total dos Serviços | Desconto Incondicionado | Deduções Base Cálculo |
+     Base de Cálculo | Total do ISSQN | ISSQN Retido | Desconto Condicionado
+     9.043,48 | 0,00 | 0,00 | 9.043,48 | 0,00 | Sim | 0,00
+   - Linha 2 (7 colunas): PIS | COFINS | INSS | IRRF | CSLL | Outras Retenções | Vl. ISSQN Retido |
+     Vl. Líquido da Nota Fiscal
+     58,78 | 271,30 | 0,00 | 0,00 | 90,43 | 0,00 | 452,17 | 8.170,80
+   Trate as duas linhas como pertencentes à MESMA seção de tributos retidos - a linha 2 não é uma
+   tabela separada nem informativa. Os 5 primeiros valores da linha 2 (PIS, COFINS, INSS, IRRF,
+   CSLL) são retenções REAIS deste documento, mesmo que a linha 1 mostre "Total do ISSQN: 0,00"
+   (esse campo é só o ISS apurado/calculado da linha 1 - não tem nenhuma relação com os valores de
+   PIS/COFINS/INSS/IRRF/CSLL da linha 2, e não indica ausência de retenção dos demais tributos).
+   Neste exemplo, o JSON obrigatório inclui (entre outros campos):
+   "valorPIS": "58.78", "basePIS": "9043.48",
+   "valorCOFINS": "271.30", "valorCofins": "271.30", "baseCofins": "9043.48",
+   "totalCSLL": "90.43", "valorCSLL": "90.43", "baseCSLL": "9043.48",
+   "totalINSS": "0.00", "totalIRRF": "0.00".
+   Deixar `percentualPIS`, `percentualCofins` e `percentualCSLL` como "0.00" quando a linha não
+   trouxer alíquota explícita (o percentual é recalculado automaticamente a partir do valor
+   absoluto e da base em etapa posterior do pipeline, fora desta extração). NUNCA zerar PIS/COFINS/
+   CSLL só porque essa tabela vem em 2 linhas e os valores de retenção ficam visualmente distantes
+   do rótulo "Detalhamento dos Tributos" - foi exatamente esse layout que causou PIS/COFINS/CSLL
+   zerados por engano no pedido 6485/nota 22407 (23/09/2026), lançado no Mega com esses 3 tributos
+   incorretamente como "0.00" quando os valores reais eram 58,78 / 271,30 / 90,43.
+
 Valor total do documento e Valores de Mercadoria/Bases:
 1. Para `valorTotalDocumento`, usar o valor total bruto do documento fiscal principal, EXCETO nos
    casos previstos nas regras 2 e 5 abaixo (NFS-e/NFS-EG com retenção e NF-e/DANFE), onde

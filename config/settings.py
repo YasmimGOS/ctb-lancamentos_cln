@@ -80,6 +80,14 @@ class Settings(BaseModel):
     enviar_webhook_em_teste: bool = _bool(os.getenv("ENVIAR_WEBHOOK_EM_TESTE", "false"))
     usar_pdf_mock: bool = _bool(os.getenv("USAR_PDF_MOCK", "false"))
 
+    # PALIATIVO PROVISÓRIO (ver docs/REGRAS_PROJETO.md secao 3.21): quando True, o pedido igual a
+    # CODIGO_TESTE pula a verificacao de "ja processado no BD" (controllers/lancamento_controller.py)
+    # e e reprocessado mesmo ja tendo um registro anterior. Serve so para reprocessar o MESMO pedido
+    # de teste varias vezes durante os dias de ajuste da tolerancia de Cond.Pagto x Boleto, sem
+    # precisar que alguem apague o registro no BD externo. Nao tem efeito fora de CODIGO_TESTE -
+    # nunca afeta pedidos de producao normal.
+    ignorar_ja_processado_teste: bool = _bool(os.getenv("IGNORAR_JA_PROCESSADO_TESTE", "false"))
+
     # Selecao de pedidos
     filtro_pedidos: str = os.getenv("FILTRO_PEDIDOS", "")
     limite_pedidos: int = int(os.getenv("LIMITE_PEDIDOS", "1") or "0")
@@ -101,6 +109,13 @@ class Settings(BaseModel):
     # e manda para lancamento manual). False = desativa o bloqueio (documento com PIS/COFINS
     # lanca normalmente) - usar quando a TI resolver o lancamento correto desses tributos.
     bloqueio_pis_cofins_ativo: bool = _bool(os.getenv("BLOQUEIO_PIS_COFINS_ATIVO", "true"))
+
+    # PALIATIVO PROVISÓRIO (ver docs/REGRAS_PROJETO.md secao 3.21): tolerancia em dias para a
+    # Validacao 7 (Cond. Pagamento x Vencimento do Boleto). Comeca em 1 dia (23/09/2026) para
+    # cobrir o pedido 6485 (38D cadastrado vs 37D calculado); aumentar aqui conforme necessario
+    # durante o periodo de teste. Remover/zerar quando a divergencia entre cadastro e boleto for
+    # resolvida na origem.
+    tolerancia_dias_cond_pagto: int = int(os.getenv("TOLERANCIA_DIAS_COND_PAGTO", "1") or "0")
 
     @property
     def filtro_pedidos_list(self) -> list[int]:

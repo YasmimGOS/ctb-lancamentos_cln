@@ -16,7 +16,8 @@ class IntegraBpmsService:
 
     def obter_lista_pedidos(self) -> list[dict]:
         resp = request_json("GET", self.s.bpms_pedanexorpa_url,
-                            headers={"Authorization": self.s.bpms_token})
+                            headers={"Authorization": self.s.bpms_token},
+                            tentativas=3, intervalo_s=10)
         resp.raise_for_status()
         return (resp.json() or {}).get("data", []) or []
 
