@@ -80,9 +80,10 @@ def request_json(method: str, url: str, *, headers: dict[str, str] | None = None
             # Log da response (detalhado)
             log.info("HTTP RESPONSE | Status: %s | Tempo: %.2fs", response.status_code, duracao)
 
-            if response.status_code >= 500 and tentativa < tentativas:
-                log.warning("Resposta 5xx (%s/%s) em %s: status %s. Aguardando %ss antes de tentar novamente...",
-                            tentativa, tentativas, url, response.status_code, intervalo_s)
+            if (response.status_code >= 500 or response.status_code == 401) and tentativa < tentativas:
+                log.warning("Resposta %s (%s/%s) em %s: status %s. Aguardando %ss antes de tentar novamente...",
+                            "5xx" if response.status_code >= 500 else "401", tentativa, tentativas, url,
+                            response.status_code, intervalo_s)
                 time.sleep(intervalo_s)
                 continue
 

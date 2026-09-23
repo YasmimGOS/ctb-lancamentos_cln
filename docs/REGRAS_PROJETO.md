@@ -1270,6 +1270,24 @@ chave.
 - **Nota:** essa mudança só afeta o AVISO no Teams; o log técnico completo do erro
   (`log.exception`) continua sendo escrito normalmente no arquivo de log, então nada se perde para
   fins de auditoria/depuração - só o alarme para a usuária é que passou a ser condicional.
+- **Gatilho 3 (mesmo dia, pedido 104, arquivo "VISAO COMMERCIAL PROPERTIES.pdf"):** o mesmo erro
+  transitório `401 Unauthorized` da API de IA apareceu de novo, dessa vez num pedido com **apenas
+  1 anexo** - sem outro documento para "salvar" o lançamento, o pedido falhou por completo
+  ("Falha ao determinar dados para lançamento"). PDF conferido e confirmado saudável (DANFSe v2.0
+  bem formado, sem senha/corrupção, com PIS/COFINS/CSLL genuinamente retidos) - a falha foi 100%
+  do serviço externo de IA, não do documento. Esse mesmo 401 já havia aparecido 2x antes no mesmo
+  dia (pedido 6485), sempre cercado de chamadas bem-sucedidas com a mesma chave segundos antes/
+  depois - padrão de instabilidade transitória do serviço, não de credencial inválida.
+- **Correção aplicada:** `services/http_client.py::request_json` - a condição de retry passou de
+  `status_code >= 500` para `status_code >= 500 or status_code == 401`. Como só a chamada de envio
+  primário à IA (`services/ia_service.py::_extrair`, a submissão `POST .../pdf/async`) já usa
+  `tentativas=3, intervalo_s=30`, essa mudança só passa a ter efeito prático nessa chamada
+  específica - as demais chamadas do projeto (BPMS, Mega, polling de status da IA) continuam com
+  o default `tentativas=1`, então continuam sem retry, comportamento inalterado.
+- **Nota de segurança:** 401 também pode significar credencial genuinamente inválida/expirada (não
+  só instabilidade transitória) - nesse caso o retry só atrasa a falha final em `intervalo_s ×
+  (tentativas-1)` segundos (60s), sem nenhum efeito colateral negativo (POST idempotente do lado
+  da IA - 401 nunca chega a processar nada).
 
 ### 3.23 PIS/COFINS/CSLL zerados por engano (falso negativo) - mesma armadilha da tabela de tributos em duas linhas da seção 3.18, agora atingindo a extração primária - CORRIGIDO E CONFIRMADO (23/09/2026)
 
