@@ -1451,6 +1451,35 @@ chave.
 - **Pendência de confirmação:** aguardando reprocessamento de nota do mesmo layout/prestador de
   Goiânia para confirmar a classificação correta como "NFS-EG".
 
+### 3.27 percentualISS calculado sobre a base errada (líquido em vez de bruto) - CORRIGIDO (24/09/2026)
+
+- **Gatilho:** a usuária notou que o `percentualISS` lançado não batia com a "Alíquota Aplicada"
+  impressa na nota (pedido 104/nota 207: nota mostra alíquota 5,00%, mas o sistema calculava e
+  enviava 5,54%).
+- **Causa raiz confirmada:** `services/business_rules.py::aplicar_iss_do_valor_retido` (chamada em
+  `etl_service.py::consolidar_resposta_ia` sempre que a 2ª chamada da IA confirma ISS retido)
+  recalculava `percentualISS = valorISSRetido × 100 / valorTotalDocumento`. Só que em NFS-e/
+  NFS-EG, `valorTotalDocumento` é sempre o valor **líquido** (regra explícita do
+  `prompt_1a_ia.txt`), enquanto a alíquota real impressa na nota é sempre calculada sobre o
+  **bruto** ("Valor da Operação/Serviço"/"Valor Total do Serviço" = `valorMercadoria`). Usar o
+  líquido como base infla o percentual e o mostra errado, mesmo quando a extração da IA já tinha
+  lido o percentual certo na 1ª chamada (esse recálculo SOBRESCREVIA o valor correto).
+  - Pedido 104/nota 207: retido=26,34, líquido=475,87 → 5,54% (errado); bruto=526,70 → **5,00%**
+    (correto, bate com a nota).
+  - Confirmado que o MESMO bug já afetava o pedido 6485/nota 22407 (seção 3.23/3.25), sem ter
+    sido notado antes: retido=452,17, líquido=8.170,80 → 5,53% (o que foi lançado); bruto=9.043,48
+    → **5,00%** (correto).
+- **Correção aplicada:** `aplicar_iss_do_valor_retido` passou a usar `valorMercadoria` (bruto)
+  como base do percentual, com fallback para `valorTotalDocumento` só se `valorMercadoria` não
+  tiver sido extraído (evita divisão por zero, preserva o comportamento anterior nesse caso raro).
+  Testado com os dois casos reais (104 e 6485): ambos passam a dar 5,00% corretamente.
+- **Pendência URGENTE (correção manual no Mega):** todas as transações já lançadas com ISS retido
+  confirmado pela 2ª chamada da IA podem ter `percentualISS`/`baseISS` errados por este bug -
+  inclui, no mínimo, as transações do pedido 6485/nota 22407 (8688424, 8689172, 8689534) e do
+  pedido 104/nota 207 (8693974, 8694275, 8694432, 8704284). Como o `valorISS` (valor absoluto)
+  sempre esteve correto, o impacto é só no campo de alíquota/base exibido, não no valor do
+  tributo lançado - mas vale conferir e corrigir onde for necessário.
+
 ---
 
 ## 4. Integracao IA (Claude)

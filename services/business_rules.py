@@ -74,7 +74,15 @@ def aplicar_iss_do_valor_retido(ia: dict, extra: dict) -> dict:
     retido = fmt.to_float(extra.get("valorISSRetido", "0"))
     if retido <= 0:
         return ia
-    base = fmt.to_float(ia.get("valorTotalDocumento", "0"))
+    # Base do percentual de ISS: usar valorMercadoria (bruto - "Valor da Operação/Serviço"/"Valor
+    # Total do Serviço"), NUNCA valorTotalDocumento. Em NFS-e/NFS-EG, valorTotalDocumento é sempre
+    # o valor LÍQUIDO (ver regra do prompt_1a_ia.txt), mas a "Alíquota Aplicada" impressa na nota é
+    # sempre calculada sobre o bruto - usar o líquido como base gera um percentual inflado e
+    # incorreto (caso real pedido 104/nota 207: retido=26.34, líquido=475.87 -> 5.54% errado;
+    # bruto=526.70 -> 5.00% certo, batendo com a alíquota impressa na nota). Fallback para
+    # valorTotalDocumento só se valorMercadoria não tiver sido extraído (nunca deveria acontecer
+    # em documento de serviço, mas evita divisão por zero).
+    base = fmt.to_float(ia.get("valorMercadoria", "0")) or fmt.to_float(ia.get("valorTotalDocumento", "0"))
     perc = fmt.format_number((retido * 100 / base)) if base > 0 else "0.00"
     ia = dict(ia)
     ia["valorISS"] = fmt.format_number(retido)
