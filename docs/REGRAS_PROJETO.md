@@ -1480,6 +1480,19 @@ chave.
   sempre esteve correto, o impacto é só no campo de alíquota/base exibido, não no valor do
   tributo lançado - mas vale conferir e corrigir onde for necessário.
 
+### 3.28 Campo `defCalculoIPI` ausente do payload (completude de schema) - CORRIGIDO (25/09/2026)
+
+- **Gatilho:** usuária comparou o body enviado com o schema oficial completo da API do Mega
+  Integrador (fornecido por ela) e notou que `itensReceb[].defCalculoIPI` existe no schema mas
+  nunca era enviado pelo nosso payload.
+- **Correção aplicada:** `models.py::ItemReceb` (ou equivalente) e
+  `services/etl_service.py::montar_item` passaram a incluir `"defCalculoIPI": ""` (mesmo padrão
+  aditivo/vazio dos campos `tragnCodigo`/`tipoTrans`/`icmsStreRecupera` da seção 3.8) - campo
+  posicionado entre `sitTribIPI` e `codEnquadramentoIPI`, igual ao schema oficial. Mudança aditiva
+  e de baixo risco - não altera nenhum valor calculado, só completa o schema.
+- **Nota:** ordem das chaves no JSON não afeta o parsing (não é relevante para o Mega aceitar ou
+  não o payload) - a mudança é sobre a PRESENÇA da chave, não sobre onde ela aparece no objeto.
+
 ---
 
 ## 4. Integracao IA (Claude)

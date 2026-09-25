@@ -220,6 +220,7 @@ class ItemReceb(BaseModel):
     percentualCSLL: str = "0"
     valorCSLL: str = "0"
     sitTribIPI: str = "49"
+    defCalculoIPI: str = ""
     codEnquadramentoIPI: str = "999"
     centrosCusto: list[CentroCusto] = Field(default_factory=list)
     pedidos: list[PedidoRef] = Field(default_factory=list)

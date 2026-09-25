@@ -262,6 +262,7 @@ def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
         "percentualCSLL": perc_ou_calc("valorCSLL", "percentualCSLL", base_fiscal_dec),
         "valorCSLL": valor_ou_calc("valorCSLL", "percentualCSLL", base_fiscal_dec),
         "sitTribIPI": "49",
+        "defCalculoIPI": "",
         "codEnquadramentoIPI": "999",
     }
 
