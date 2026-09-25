@@ -1493,6 +1493,35 @@ chave.
 - **Nota:** ordem das chaves no JSON não afeta o parsing (não é relevante para o Mega aceitar ou
   não o payload) - a mudança é sobre a PRESENÇA da chave, não sobre onde ela aparece no objeto.
 
+### 3.29 Diff sistemático completo contra o schema oficial do Mega - 3 divergências encontradas e corrigidas (25/09/2026)
+
+- **Contexto:** com o schema oficial completo em mãos (fornecido pela usuária), foi feito um diff
+  programático de TODAS as chaves do payload gerado (raiz, item, centrosCusto, projetos, pedidos,
+  parcelas) contra o schema, em vez de conferir só visualmente. Resultado: 3 divergências reais.
+- **1. Campo extra na raiz - `valorBaseIPI`:** existia na raiz do payload
+  (`services/etl_service.py::montar_payload`, `models.py::PayloadRecebimento`), mas esse campo só
+  existe dentro do item no schema oficial, não na raiz. Removido (junto com o cálculo
+  `base_ipi_raiz`, que só era usado ali) - a pedido explícito da usuária, já que remover um campo
+  que já vinha sendo enviado (ainda que não documentado) é diferente de só completar o schema.
+- **2. Campo ausente em `centrosCusto` - `sequenciaCC`:** cada linha de rateio (centro de custo)
+  de um item não tinha nenhum identificador de sequência - `services/etl_service.py::montar_item`
+  agora usa `enumerate(grupo, start=1)` no loop de rateio e preenche `sequenciaCC` com o índice
+  (1, 2, 3...). **Potencialmente relevante para o caso do fornecedor Arquivolff (pedido 320588, 9
+  rateios do mesmo item, ver comentário em `_agrupar_por_item`)** - sem esse campo, o Mega não
+  tinha como distinguir uma linha de rateio da outra além da ordem de envio.
+- **3. Campos ausentes em `projetos` - `sequenciaCC` e `sequenciaProjeto`:** mesma correção,
+  propagando o índice do rateio (`sequenciaCC`) e fixando `sequenciaProjeto="1"` (hoje só existe
+  um projeto por centro de custo no sistema, nunca houve rateio de projeto dentro do mesmo CC).
+- **Modelos atualizados:** `models.py::CentroCusto` e `models.py::Projeto` ganharam os campos
+  `sequenciaCC`/`sequenciaProjeto` tipados (já aceitavam via `extra="allow"`, mas ficam explícitos
+  agora).
+- **Validado:** script ad-hoc gerando payload com item de 2 rateios confirma `sequenciaCC=1` e
+  `sequenciaCC=2` corretamente incrementados, e diff de chaves contra o schema oficial dá "nenhuma
+  divergência" em todos os níveis (raiz, item, centrosCusto, projetos, pedidos, parcelas).
+- **Pendência de confirmação:** aguardando um pedido real com múltiplos rateios de centro de
+  custo/projeto (ex.: outro caso como o Arquivolff) para confirmar se `sequenciaCC` resolve algum
+  problema de rateio que possa ter passado despercebido até aqui.
+
 ---
 
 ## 4. Integracao IA (Claude)

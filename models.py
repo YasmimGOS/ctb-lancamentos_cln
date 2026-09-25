@@ -126,6 +126,8 @@ class Projeto(BaseModel):
     model_config = ConfigDict(extra="allow")
     numNota: str = ""
     itemSequencia: str = ""
+    sequenciaCC: str = ""
+    sequenciaProjeto: str = ""
     projetoReduzido: str = ""
     tipoClasse: str = ""
     prctRateio: str = ""
@@ -137,6 +139,7 @@ class CentroCusto(BaseModel):
     model_config = ConfigDict(extra="allow")
     numNota: str = ""
     itemSequencia: str = ""
+    sequenciaCC: str = ""
     centroCustoReduzido: str = ""
     tipoClasse: str = ""
     prctRateio: str = ""
@@ -267,7 +270,6 @@ class PayloadRecebimento(BaseModel):
     tragnCodigo: str = ""
     tipoTrans: str = ""
     icmsStreRecupera: str = ""
-    valorBaseIPI: str = ""
     calculaValores: str = "N"
     operacao: str = ""
     itensReceb: list[ItemReceb] = Field(default_factory=list)

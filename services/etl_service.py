@@ -267,13 +267,14 @@ def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
     }
 
     centros_custo = []
-    for dp_rateio in grupo:
+    for idx_rateio, dp_rateio in enumerate(grupo, start=1):
         prct = fmt.to_float(_g(dp_rateio, "PRCT_CC", default="0"))
         valor_rateio = fmt.format_number(base_dec * prct / 100)
         prct_fmt = f"{prct:.4f}"
         centros_custo.append({
             "numNota": str(num_nota),
             "itemSequencia": str(_g(dp_rateio, "ITEM_SEQUENCIA", default="")),
+            "sequenciaCC": str(idx_rateio),
             "centroCustoReduzido": str(_g(dp_rateio, "CC_RATEIO", "CC_PADRAO", default="")),
             "tipoClasse": str(_g(dp_rateio, "TIPO_CLASSE", default="")),
             "prctRateio": prct_fmt,
@@ -282,6 +283,8 @@ def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
             "projetos": [{
                 "numNota": str(num_nota),
                 "itemSequencia": str(_g(dp_rateio, "ITEM_SEQUENCIA", default="")),
+                "sequenciaCC": str(idx_rateio),
+                "sequenciaProjeto": "1",
                 "projetoReduzido": str(_g(dp_rateio, "PROJETO", "PROJ_PADRAO", default="")),
                 "tipoClasse": str(_g(dp_rateio, "TIPO_CLASSE", default="")),
                 "prctRateio": prct_fmt,
@@ -431,7 +434,6 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     serie = br.resolver_serie(tipo_doc, ia.get("serie", ""), ia.get("chaveAcesso", ""), cnpj_emitente)
     chave = br.resolver_chave_acesso(tipo_doc, ia.get("chaveAcesso", ""))
     base_icms_raiz = "0" if is_servico else str(ia.get("baseICMS", "0.00"))
-    base_ipi_raiz = "0" if is_servico else str(ia.get("valorBaseIPI", "0.00"))
 
     # valorICMS da raiz: usar o valor da IA somente se for um float valido (fmt.to_float retorna
     # 0.0 para lixo como "92.750.00" - dois pontos, comum quando a IA converte "92.750,00" trocando
@@ -507,7 +509,6 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
         "valorICMSDesonera": str(ia.get("valorICMSDesonera", "0.00")),
         "valorPisRecupera": str(ia.get("valorPisRecupera", "0.00")),
         "valorCofinsRecupera": str(ia.get("valorCofinsRecupera", "0.00")),
-        "valorBaseIPI": base_ipi_raiz,
         "operacao": "I",
         "calculaValores": "N",
         "itensReceb": itens,
