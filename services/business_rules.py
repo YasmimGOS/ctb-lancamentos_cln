@@ -10,6 +10,8 @@ from config import (
     CNPJS_PRESTADOR_GOIANIA,
     COND_PAGTO_A_VISTA,
     DEPARA_FILIAIS,
+    NATUREZAS_DETRAN_ACAO_770,
+    NATUREZAS_DETRAN_RECONHECIDAS,
     TABELA_DEPARA_TIPODOC,
     TIPO_DOC_POR_EMITENTE,
 )
@@ -52,13 +54,31 @@ def ajustar_bolp_detran(tipo_doc: str) -> str:
     return tipo_doc
 
 
-def calcular_acao_e_conta(tipo_doc: str, cond_pagto: str) -> dict:
-    entrada = TABELA_DEPARA_TIPODOC.get((tipo_doc or "").strip())
+def calcular_acao_e_conta(tipo_doc: str, cond_pagto: str, natureza_cobranca_detran: str = "") -> dict:
+    tipo = (tipo_doc or "").strip()
+    entrada = TABELA_DEPARA_TIPODOC.get(tipo)
     if not entrada:
         return {"contasPagarTipoDoc": "", "acao": 0}
+    # BOLP-DETRAN-IPVA-ANTT cobre tanto IPVA/Licenciamento/ANTT (sempre acao=770) quanto multas de
+    # transito que citam a ANTT como orgao regulamentador (mantem a acao_vista/acao_prazo abaixo) -
+    # ver config.NATUREZAS_DETRAN_ACAO_770 e prompts/prompt_1a_ia.txt (naturezaCobrancaDetran).
+    if tipo == "BOLP-DETRAN-IPVA-ANTT" and (natureza_cobranca_detran or "").strip().upper() in NATUREZAS_DETRAN_ACAO_770:
+        return {"contasPagarTipoDoc": entrada["contasPagarTipoDoc"], "acao": 770}
     a_vista = (cond_pagto or "").strip().upper() in COND_PAGTO_A_VISTA
     acao = entrada["acao_vista"] if a_vista else entrada["acao_prazo"]
     return {"contasPagarTipoDoc": entrada["contasPagarTipoDoc"], "acao": int(acao)}
+
+
+def natureza_cobranca_detran_indeterminada(tipo_doc: str, natureza_cobranca_detran: str) -> bool:
+    """True quando o documento e BOLP-DETRAN-IPVA-ANTT mas a IA nao conseguiu determinar se a
+    natureza da cobranca e IPVA/Licenciamento/ANTT (acao=770) ou Multa (acao=768/771) - ver
+    config.NATUREZAS_DETRAN_RECONHECIDAS. Nesse caso o lancamento automatico nao deve prosseguir
+    "adivinhando" a acao: deve bloquear e pedir execucao manual (ver validacao correspondente em
+    controllers/lancamento_controller.py)."""
+    tipo = (tipo_doc or "").strip()
+    if tipo != "BOLP-DETRAN-IPVA-ANTT":
+        return False
+    return (natureza_cobranca_detran or "").strip().upper() not in NATUREZAS_DETRAN_RECONHECIDAS
 
 
 def eh_documento_servico(tipo_doc: str, tipos_servico: set[str]) -> bool:
@@ -366,7 +386,19 @@ def remove_zeros_a_esquerda(num_nota: str) -> str:
     return s
 
 
-def num_nota_por_pedido(num_nota_ia: str, pdc_codigo) -> str:
+def num_nota_por_pedido(num_nota_ia: str, pdc_codigo, tipo_doc: str = "") -> str:
+    """Numero do documento fiscal (Doc. Fiscal) usado no payload/notificacoes.
+
+    Para documentos tipo boleto puro (ver TIPOS_DOC_BOLETO/eh_tipo_doc_boleto: BOLP, BOLP-DETRAN,
+    BOLP-DETRAN-IPVA-ANTT) NAO ha nota fiscal de verdade - o numero impresso no boleto (nosso
+    numero, linha digitavel etc.) nao identifica o documento para fins de lancamento/conciliacao
+    no Mega. Nesses casos o Doc. Fiscal e SEMPRE o numero do pedido de compra, mesmo que a IA tenha
+    lido algum numero no boleto (caso real pedido 325891: boleto IPVA leu numNota="251395114222"
+    do proprio boleto, mas o Doc. Fiscal correto e sempre o numero do pedido, 325891).
+    Para os demais tipos, usa o numNota da IA e so cai para o pedido quando vier vazio.
+    """
+    if eh_tipo_doc_boleto(tipo_doc):
+        return str(pdc_codigo or "")
     return str(num_nota_ia).strip() if str(num_nota_ia or "").strip() else str(pdc_codigo or "")
 
 

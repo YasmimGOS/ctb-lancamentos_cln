@@ -69,6 +69,7 @@ class Anexo(BaseModel):
 class RespostaIA(BaseModel):
     model_config = ConfigDict(extra="allow")
     tipoDocFiscal: str = ""
+    naturezaCobrancaDetran: str = ""
     numNota: str = ""
     serie: str = ""
     dataDocumento: str = ""

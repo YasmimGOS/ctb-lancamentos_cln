@@ -172,7 +172,7 @@ class LancamentoController:
             return [], "ErroLeituraComprovante"
 
         ia_final = etl.agregar_transacoes_rota_verde([r["ia_raw"] for r in candidatos])
-        ia_final["numNota"] = br.num_nota_por_pedido(ia_final.get("numNota", ""), pdc)
+        ia_final["numNota"] = br.num_nota_por_pedido(ia_final.get("numNota", ""), pdc, "RECIBO")
         log.info(sanitize_emoji("  ├─ 🔄 Rota Verde: %d comprovante(s) somados"), len(candidatos))
         log.info("  │  ├─ valorMercadoria (soma): %s", ia_final["valorMercadoria"])
         log.info("  │  └─ dataDocumento (mais antiga): %s", ia_final["dataDocumento"])
@@ -710,7 +710,8 @@ class LancamentoController:
             log.info("  │     %s", json.dumps(ia_final, indent=2, ensure_ascii=False))
 
             # Calcular ação e conta
-            acao_conta = br.calcular_acao_e_conta(tipo_doc, cond_pagto)
+            acao_conta = br.calcular_acao_e_conta(
+                tipo_doc, cond_pagto, ia_final.get("naturezaCobrancaDetran", ""))
             log.info(sanitize_emoji("  ├─ 💼 Ação e Conta calculadas"))
             log.info("  │  ├─ contasPagarTipoDoc: %s", acao_conta.get("contasPagarTipoDoc", ""))
             log.info("  │  └─ acao: %s", acao_conta.get("acao", ""))
@@ -773,6 +774,7 @@ class LancamentoController:
                 "cond_pagto": payload.get("condPagto", ""),
                 "data_vencimento": ia_final.get("dataVencimento", ""),
                 "almoxarifado": ia_final.get("almoxarifado", ""),
+                "natureza_cobranca_detran": ia_final.get("naturezaCobrancaDetran", ""),
                 # Guardados só para diagnostico/Teams da Validação 5B (Chave de Acesso) - não vão
                 # para o payload do Mega.
                 "chave_primaria_raw": str(ia_raw.get("chaveAcesso", "")).strip(),
@@ -917,6 +919,34 @@ class LancamentoController:
             log.info("  └─ Status final: %s (registrado no BD)", res.status)
             return res
         log.info(sanitize_emoji("  │  ✓ Sem menção a Almoxarifado"))
+
+        # Validação: Natureza da cobrança DETRAN (IPVA/Licenciamento/ANTT x Multa)
+        # BOLP-DETRAN-IPVA-ANTT cobre tanto IPVA/Licenciamento/ANTT (acao=770 sempre) quanto multa
+        # de trânsito que cita a ANTT como órgão regulamentador (acao=768/771 vista/prazo) - ver
+        # business_rules.calcular_acao_e_conta e prompts/prompt_1a_ia.txt (naturezaCobrancaDetran).
+        # Quando a IA não consegue determinar qual dos dois casos é, NÃO adivinhar a ação: bloquear
+        # e pedir execução manual (caso real pedido 325891: IPVA lançado com acao errado por falta
+        # dessa distinção).
+        log.info("  ├─ Validação 2B: Natureza da cobrança DETRAN (IPVA/Licenciamento/ANTT x Multa)...")
+        natureza_detran = contexto.get("natureza_cobranca_detran", "")
+        if br.natureza_cobranca_detran_indeterminada(contexto.get("tipo_doc", ""), natureza_detran):
+            log.warning(sanitize_emoji("  │  ⚠️  Documento DETRAN (IPVA/ANTT) sem natureza da cobrança "
+                                        "reconhecida (naturezaCobrancaDetran=%r) - bloqueio manual ativado"),
+                        natureza_detran)
+            msg = ("Documento DETRAN não permitiu identificar com segurança se é IPVA/Licenciamento/ANTT "
+                   "ou Multa - lançamento requer execução manual")
+            detalhes = {
+                "naturezaCobrancaDetran extraído": natureza_detran or "(vazio)",
+            }
+            self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+            self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                erro="Motivo: naturezaCobrancaDetran nao reconhecida (IPVA/Licenciamento/ANTT "
+                                     "x Multa indeterminado) - lancamento manual")
+            res.deve_lancar = False
+            res.status = "NaturezaDetranManual"
+            log.info("  └─ Status final: %s (registrado no BD)", res.status)
+            return res
+        log.info(sanitize_emoji("  │  ✓ Natureza da cobrança DETRAN reconhecida (ou não aplicável a este tipo)"))
 
         # Validação: CNPJ Emitente x Fornecedor
         log.info("  ├─ Validação 3: CNPJ Emitente x Fornecedor...")

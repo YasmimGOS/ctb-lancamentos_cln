@@ -171,12 +171,30 @@ TABELA_DEPARA_TIPODOC: dict[str, dict[str, object]] = {
     "NFS-E": {"contasPagarTipoDoc": "NFS", "acao_vista": 295, "acao_prazo": 82},
     "NFF": {"contasPagarTipoDoc": "NFF", "acao_vista": 295, "acao_prazo": 82},
     "BOLP": {"contasPagarTipoDoc": "BOLP", "acao_vista": 771, "acao_prazo": 768},
-    "BOLP-DETRAN": {"contasPagarTipoDoc": "BOLP", "acao_vista": 770, "acao_prazo": 770},
+    "BOLP-DETRAN": {"contasPagarTipoDoc": "BOLP", "acao_vista": 768, "acao_prazo": 771},
     "BOLP-DETRAN-IPVA-ANTT": {"contasPagarTipoDoc": "BOLP", "acao_vista": 768, "acao_prazo": 771},
     "RECIBO": {"contasPagarTipoDoc": "REC", "acao_vista": 771, "acao_prazo": 768},
     "NFSC": {"contasPagarTipoDoc": "NFF", "acao_vista": 295, "acao_prazo": 82},
     "DANFCom": {"contasPagarTipoDoc": "NFF", "acao_vista": 295, "acao_prazo": 82},
 }
+
+# tipoDocFiscal "BOLP-DETRAN-IPVA-ANTT" cobre tanto cobrancas de IPVA/Licenciamento/ANTT quanto
+# multas de transito que citam a ANTT como orgao regulamentador - a IA nao distingue isso so pelo
+# tipoDocFiscal, por isso extrai tambem `naturezaCobrancaDetran` (ver prompts/prompt_1a_ia.txt).
+# Quando a natureza extraida for uma destas, a acao e sempre 770, independente de vista/prazo
+# (caso real pedido 325891: IPVA com cond. pagto "15D" lancou acao=771 em vez de 770). Para
+# natureza "MULTA" mantem a acao_vista/acao_prazo da tabela acima (768/771). "BOLP-DETRAN"
+# generico (licenciamento sem mencao a IPVA/ANTT, ver prompts/prompt_1a_ia.txt regra 12) nunca
+# entra nessa excecao - fica sempre 768/771 (tabela acima), mesmo que naturezaCobrancaDetran
+# venha preenchido.
+NATUREZAS_DETRAN_ACAO_770 = {"IPVA", "LICENCIAMENTO", "ANTT"}
+
+# Naturezas que a IA consegue de fato reconhecer para BOLP-DETRAN-IPVA-ANTT (as 3 acima + MULTA).
+# Qualquer outro valor (incluindo "") significa que a IA nao conseguiu determinar com seguranca se
+# o documento e IPVA/Licenciamento/ANTT (acao=770) ou Multa (acao=768/771) - nesse caso o
+# lancamento automatico deve ser bloqueado e o pedido encaminhado para execucao manual (ver
+# services/business_rules.py::natureza_cobranca_detran_indeterminada).
+NATUREZAS_DETRAN_RECONHECIDAS = NATUREZAS_DETRAN_ACAO_770 | {"MULTA"}
 
 TIPO_DOC_POR_EMITENTE: dict[str, str] = {
     "61074175000138": "BOLP",

@@ -54,6 +54,61 @@ def test_acao_a_vista_e_prazo():
     assert br.calcular_acao_e_conta("APOLICE", "30D") == {"contasPagarTipoDoc": "", "acao": 0}
 
 
+def test_acao_ipva_licenciamento_antt_sempre_770_independente_de_cond_pagto():
+    # Caso real pedido 325891: cond. pagto "15D" (a prazo) gerou acao=771 em vez de 770.
+    # IPVA/Licenciamento/ANTT devem lancar sempre acao=770, tanto a vista quanto a prazo.
+    for natureza in ("IPVA", "LICENCIAMENTO", "ANTT"):
+        assert br.calcular_acao_e_conta("BOLP-DETRAN-IPVA-ANTT", "15D", natureza)["acao"] == 770
+        assert br.calcular_acao_e_conta("BOLP-DETRAN-IPVA-ANTT", "ADIANT", natureza)["acao"] == 770
+
+
+def test_acao_multa_detran_mantem_vista_prazo():
+    # Multa de transito (mesmo citando ANTT como orgao regulamentador) NAO entra na excecao do
+    # acao=770 - mantem a acao_vista/acao_prazo normal da tabela (768/771).
+    assert br.calcular_acao_e_conta("BOLP-DETRAN-IPVA-ANTT", "ADIANT", "MULTA")["acao"] == 768
+    assert br.calcular_acao_e_conta("BOLP-DETRAN-IPVA-ANTT", "15D", "MULTA")["acao"] == 771
+    # Natureza nao determinada ("") tambem cai no fallback vista/prazo aqui - mas o controller NAO
+    # deve chegar a usar esse valor: ver test_natureza_cobranca_detran_indeterminada, que bloqueia
+    # o lancamento automatico antes de calcular_acao_e_conta ser usado para lancar.
+    assert br.calcular_acao_e_conta("BOLP-DETRAN-IPVA-ANTT", "15D", "")["acao"] == 771
+
+
+def test_acao_bolp_detran_generico_sempre_vista_prazo():
+    # BOLP-DETRAN (generico, licenciamento sem mencao a IPVA/ANTT - prompts/prompt_1a_ia.txt regra
+    # 12) nunca entra na excecao do acao=770, mesmo que naturezaCobrancaDetran venha preenchido -
+    # a excecao so vale para o tipoDocFiscal BOLP-DETRAN-IPVA-ANTT.
+    assert br.calcular_acao_e_conta("BOLP-DETRAN", "ADIANT")["acao"] == 768
+    assert br.calcular_acao_e_conta("BOLP-DETRAN", "15D")["acao"] == 771
+    assert br.calcular_acao_e_conta("BOLP-DETRAN", "15D", "LICENCIAMENTO")["acao"] == 771
+
+
+def test_natureza_cobranca_detran_indeterminada():
+    # BOLP-DETRAN-IPVA-ANTT com natureza reconhecida: NAO indeterminado.
+    for natureza in ("IPVA", "LICENCIAMENTO", "ANTT", "MULTA", "multa", "ipva"):
+        assert br.natureza_cobranca_detran_indeterminada("BOLP-DETRAN-IPVA-ANTT", natureza) is False
+    # BOLP-DETRAN-IPVA-ANTT sem natureza reconhecida (vazio ou valor nao esperado): indeterminado.
+    assert br.natureza_cobranca_detran_indeterminada("BOLP-DETRAN-IPVA-ANTT", "") is True
+    assert br.natureza_cobranca_detran_indeterminada("BOLP-DETRAN-IPVA-ANTT", "OUTRO") is True
+    # Outros tipoDocFiscal nunca sao indeterminados por essa regra (acao fixa na tabela).
+    assert br.natureza_cobranca_detran_indeterminada("BOLP-DETRAN", "") is False
+    assert br.natureza_cobranca_detran_indeterminada("NF-E", "") is False
+
+
+def test_num_nota_por_pedido_boleto_sempre_usa_pedido():
+    # Caso real pedido 325891: boleto IPVA leu numNota="251395114222" do proprio boleto (nosso
+    # numero), mas o Doc. Fiscal deve ser sempre o numero do pedido de compra para tipos boleto.
+    assert br.num_nota_por_pedido("251395114222", 325891, "BOLP-DETRAN-IPVA-ANTT") == "325891"
+    assert br.num_nota_por_pedido("", 325891, "BOLP-DETRAN-IPVA-ANTT") == "325891"
+    assert br.num_nota_por_pedido("999", 325891, "BOLP") == "325891"
+    assert br.num_nota_por_pedido("999", 325891, "BOLP-DETRAN") == "325891"
+
+
+def test_num_nota_por_pedido_nao_boleto_usa_ia_com_fallback_para_pedido():
+    assert br.num_nota_por_pedido("12345", 325891, "NF-E") == "12345"
+    assert br.num_nota_por_pedido("", 325891, "NF-E") == "325891"
+    assert br.num_nota_por_pedido("", 325891) == "325891"
+
+
 def test_normaliza_cond_pagto():
     assert br.normaliza_cond_pagto("20D M") == "20D"
     assert br.normaliza_cond_pagto("30/60") == "30/60"

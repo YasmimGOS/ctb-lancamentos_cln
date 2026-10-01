@@ -772,8 +772,8 @@ outputs('Compor_-_Resultado_passo_5')
   "BOLP-DETRAN": [
     {
       "contasPagarTipoDoc": "BOLP",
-      "acao_vista": 770,
-      "acao_prazo": 770
+      "acao_vista": 768,
+      "acao_prazo": 771
     }
   ],
   "BOLP-DETRAN-IPVA-ANTT": [

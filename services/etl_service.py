@@ -34,10 +34,19 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     """Aplica a cadeia de refinamento. Retorna (ia_final, cnpj_emit, cnpj_tom, tipo_doc)."""
     ia = dict(ia)
     ia = br.corrigir_total_iss_por_valor_iss(ia)
+    # cnpjEmitente não é alterado pelos passos abaixo, então pode ser resolvido já aqui para
+    # classificar tipo_doc cedo (necessário para o fallback de numNota por pedido logo abaixo).
+    cnpj_emitente = val.normaliza_cnpj(ia.get("cnpjEmitente", ""))
+    tipo_doc = br.resolver_tipo_doc_por_emitente(ia.get("tipoDocFiscal", ""), cnpj_emitente)
+    tipo_doc = br.corrigir_nfs_eg_por_prestador_goiania(tipo_doc, cnpj_emitente)
+    ia["tipoDocFiscal"] = tipo_doc
 
     # Consolidar e sanitizar numNota: usar a leitura mais completa entre primária e extra (a IA
     # truncar dígitos de um numNota composto, ex. "1/77" -> "1", é mais provável do que ela inventar
     # dígitos a mais - por isso comparamos pelo tamanho já sanitizado, não só se a primária veio vazia).
+    # Documentos tipo boleto puro (ver br.eh_tipo_doc_boleto) não têm nota fiscal de verdade - o
+    # número impresso no boleto é descartado aqui mesmo que a leitura tenha vindo preenchida (ver
+    # br.num_nota_por_pedido).
     num_nota_primaria = str(ia.get("numNota", "")).strip()
     num_nota_extra = str(extra.get("numNota", "")).strip()
     sanit_primaria = br.sanitiza_num_nota(num_nota_primaria)
@@ -65,7 +74,6 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     ia = br.aplicar_iss_do_valor_retido(ia, extra)
     if br.precisa_retificar_iss_nao_retido(ia, extra):
         ia = br.retificar_iss_nao_retido(ia)
-    cnpj_emitente = val.normaliza_cnpj(ia.get("cnpjEmitente", ""))
 
     # Consolidar CNPJ tomador: priorizar extra, mas validar tamanho (14 dígitos CNPJ ou 11 CPF)
     cnpj_tom_extra = val.normaliza_cnpj(_g(extra, "cnpjCpfTomador"))
@@ -79,11 +87,8 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     else:
         # Nenhum dos dois é válido, usar o que tiver (pode ficar vazio ou inválido)
         cnpj_tomador = cnpj_tom_extra or cnpj_tom_primaria
-    ia["numNota"] = br.num_nota_por_pedido(ia.get("numNota", ""), pdc_codigo)
+    ia["numNota"] = br.num_nota_por_pedido(ia.get("numNota", ""), pdc_codigo, tipo_doc)
     ia = br.calcular_percentuais_por_valor_e_base(ia)
-    tipo_doc = br.resolver_tipo_doc_por_emitente(ia.get("tipoDocFiscal", ""), cnpj_emitente)
-    tipo_doc = br.corrigir_nfs_eg_por_prestador_goiania(tipo_doc, cnpj_emitente)
-    ia["tipoDocFiscal"] = tipo_doc
     # totalISSDevido sempre espelha totalISS (Power Automate: coalesce(totalISS, '0.00')) -
     # calculado por ultimo para refletir todos os ajustes de ISS acima (retido, corrigido, zerado).
     ia["totalISSDevido"] = ia.get("totalISS", "0.00") or "0.00"

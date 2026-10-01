@@ -65,7 +65,7 @@ O fluxo segue este pipeline obrigatorio:
 | NFS-E | NFS | 295 | 82 |
 | NFF | NFF | 295 | 82 |
 | BOLP | BOLP | 771 | 768 |
-| BOLP-DETRAN | BOLP | 770 | 770 |
+| BOLP-DETRAN | BOLP | 768 | 771 |
 | BOLP-DETRAN-IPVA-ANTT | BOLP | 768 | 771 |
 | RECIBO | REC | 771 | 768 |
 | NFSC | NFF | 295 | 82 |
@@ -74,6 +74,25 @@ O fluxo segue este pipeline obrigatorio:
 **Notas:**
 - `BOLP-DETRAN*` viram `BOLP` no cabecalho
 - Tipo desconhecido ou APOLICE retorna `{"contasPagarTipoDoc": "", "acao": 0}`
+- **Excecao IPVA/Licenciamento/ANTT (sempre acao=770):** aplica-se SOMENTE quando `tipoDocFiscal` =
+  `BOLP-DETRAN-IPVA-ANTT` (documento que menciona explicitamente IPVA ou ANTT - ver regra 13 de
+  `prompts/prompt_1a_ia.txt`) E o campo extraido `naturezaCobrancaDetran` for `"IPVA"`,
+  `"LICENCIAMENTO"` ou `"ANTT"`. Nesse caso a `acao` e **sempre 770**, independente de condicao de
+  pagamento (vista/prazo) - `config.NATUREZAS_DETRAN_ACAO_770`,
+  `business_rules.calcular_acao_e_conta`. Caso real: pedido 325891 (IPVA, cond. pagto "15D") lancou
+  `acao=771` em vez de 770.
+  - **Multa** (`naturezaCobrancaDetran = "MULTA"`, mesmo citando a ANTT como orgao regulamentador da
+    infracao) mantem o `acao_vista`/`acao_prazo` normal da tabela (768/771).
+  - **`BOLP-DETRAN` generico** (licenciamento/DPVAT/DETRAN sem mencao a IPVA ou ANTT - regra 12 do
+    prompt) NUNCA entra nessa excecao, mesmo que `naturezaCobrancaDetran` venha preenchido - fica
+    sempre 768/771.
+  - **Natureza indeterminada:** se `tipoDocFiscal` = `BOLP-DETRAN-IPVA-ANTT` e
+    `naturezaCobrancaDetran` nao vier em um dos 4 valores reconhecidos (`IPVA`, `LICENCIAMENTO`,
+    `ANTT`, `MULTA` - ver `config.NATUREZAS_DETRAN_RECONHECIDAS`), o sistema NAO adivinha a `acao`:
+    bloqueia o lancamento automatico, avisa no Teams que nao conseguiu identificar o termo
+    corretamente e registra o pedido para execucao manual (`business_rules.natureza_cobranca_detran_
+    indeterminada`, validacao "Natureza da cobranca DETRAN" em
+    `controllers/lancamento_controller.py::_validar_e_lancar_payload`, status `NaturezaDetranManual`).
 
 ### 2.4 Condicao de Pagamento
 
@@ -198,6 +217,12 @@ chave.
 **numNota:**
 - Remover zeros a esquerda
 - Se vazio: usar `PDC_IN_CODIGO` (codigo do pedido)
+- **Tipos boleto puro (`BOLP`, `BOLP-DETRAN`, `BOLP-DETRAN-IPVA-ANTT`): Doc. Fiscal e SEMPRE o
+  numero do pedido de compra (`PDC_IN_CODIGO`), mesmo que a IA tenha lido algum numero no boleto**
+  (nosso numero, linha digitavel etc. nao identificam o documento para fins de lancamento/
+  conciliacao no Mega). Implementado em `business_rules.num_nota_por_pedido` (parametro
+  `tipo_doc`). Caso real: pedido 325891 (boleto IPVA) leu `numNota="251395114222"` do proprio
+  boleto; o Doc. Fiscal correto e sempre o numero do pedido, `325891`.
 
 **serie:**
 - Tipos `NF-E`, `NFSC`, `NFSTE`, `NF3E`: usar serie da IA ou extrair da chave (posicoes 22-25)

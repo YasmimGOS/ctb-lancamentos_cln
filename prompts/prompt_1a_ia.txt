@@ -6,6 +6,7 @@ retornando exclusivamente um JSON válido que siga exatamente o template abaixo.
 Template obrigatório:
 {
   "tipoDocFiscal": "string",
+  "naturezaCobrancaDetran": "string",
   "numNota": "string",
   "serie": "string",
   "dataDocumento": "dd/MM/yyyy",
@@ -252,6 +253,10 @@ Classificação de `tipoDocFiscal`:
 12. Documentos DETRAN genéricos, licenciamento, seguro DPVAT ou documento DETRAN sem menção a IPVA
     ou ANTT: "BOLP-DETRAN".
 13. Boleto ou documento DETRAN que mencione explicitamente IPVA ou ANTT: "BOLP-DETRAN-IPVA-ANTT".
+    Quando `tipoDocFiscal` for "BOLP-DETRAN" ou "BOLP-DETRAN-IPVA-ANTT", preencher também
+    `naturezaCobrancaDetran` (ver regra "Extração de `naturezaCobrancaDetran`" abaixo) - esse campo
+    decide o código de ação do lançamento, pois um mesmo boleto DETRAN pode ser IPVA, Licenciamento,
+    taxa ANTT ou multa de trânsito.
 14. Recibo isolado: "RECIBO".
 15. Se for NFS-e de Goiânia (cuidado para não confundir com nomes parecidos como "Goianira" ou
     "Aparecida de Goiânia")
@@ -279,6 +284,26 @@ Classificação de `tipoDocFiscal`:
     ficha de compensação, linha digitável ou código de barras no mesmo arquivo. Neste caso não é
     necessário extrair tributos nem valores: retornar campos monetários como "0.00" e textuais
     não aplicáveis como "".
+
+Extração de `naturezaCobrancaDetran`:
+1. Campo aplicável SOMENTE quando `tipoDocFiscal` for "BOLP-DETRAN" ou "BOLP-DETRAN-IPVA-ANTT".
+   Para qualquer outro `tipoDocFiscal`, usar sempre "".
+2. Ler a descrição/discriminação do boleto ou documento DETRAN e classificar a natureza da cobrança
+   em um dos valores abaixo (string exata, maiúsculas):
+   - "IPVA": cobrança do Imposto sobre a Propriedade de Veículos Automotores.
+   - "LICENCIAMENTO": cobrança da taxa de Licenciamento Anual do veículo (inclusive quando combinada
+     com DPVAT no mesmo boleto).
+   - "ANTT": cobrança de taxa, tarifa ou outorga da Agência Nacional de Transportes Terrestres (ex.:
+     RNTRC, renovação de registro/autorização de transporte).
+   - "MULTA": auto de infração / multa de trânsito, mesmo quando o documento cite a ANTT como órgão
+     regulamentador ou base legal da infração - uma multa de trânsito NUNCA é "ANTT" apenas por
+     citar essa sigla.
+   - "": documento DETRAN cuja natureza da cobrança não pôde ser determinada com segurança.
+3. Se o documento combinar mais de uma cobrança no mesmo boleto (ex.: IPVA + Licenciamento),
+   priorizar "IPVA".
+4. Nunca inferir "MULTA" apenas pela ausência de outras palavras-chave - só classificar como "MULTA"
+   quando houver indicação clara (ex.: "Auto de Infração", "Notificação de Multa", "Infração de
+   Trânsito", código de infração).
 
 Definição de emitente/tomador em RECIBO:
 1. Em um RECIBO simples (ex.: "Recebi de [PAGADOR] a quantia de R$X referente a..."), quem PAGA
