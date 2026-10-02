@@ -386,18 +386,21 @@ Regra de data do documento (dataDocumento):
    "Vence em", "Pagável até", "Válido até" ou o fator de vencimento embutido no código de barras.
 4. Se houver "Data do Documento" e "Data de Processamento", priorizar "Data do Documento".
 5. Para NF-e, NFS-e, NFC-e, CT-e e demais notas fiscais, usar a data de emissão da nota.
-6. Para NFS-e e NFS-EG especificamente, se houver o rótulo "Data de Competência" (ou "Competência")
-   no documento E esse valor tiver dia, mês e ano completos (dd/MM/yyyy), usar esse valor como
-   `dataDocumento` - é comum esse rótulo estar mais legível ou mais confiável do que "Data de
-   Emissão" no layout de NFS-e. Ler o ano com atenção redobrada (dígito a dígito): erros de OCR
-   trocando o último dígito do ano (ex.: "2026" lido como "2025") são comuns e graves, pois geram
-   datas de vencimento incoerentes no fluxo posterior.
-7. Se o documento também tiver o rótulo "Data de Geração" (a data em que a NFS-e foi gerada/emitida
-   no sistema, distinta de "Data de Competência" e de "Data de Emissão") E essa "Data de Geração"
-   for DIFERENTE da "Data de Competência" usada na regra 6, usar a "Data de Geração" como
-   `dataDocumento` em vez da Competência - nesse caso de divergência, a Data de Geração prevalece.
-   Se as duas datas forem iguais, não há necessidade de troca (o valor já usado pela regra 6 está
-   correto).
+6. Para NFS-e e NFS-EG especificamente, "Data de Competência" (ou "Competência") é o período de
+   referência do serviço prestado, NÃO a data de emissão - ela pode ser de um mês diferente da
+   emissão real (comum em serviços recorrentes/mensais, faturados no mês seguinte ao da
+   competência). NUNCA usar "Data de Competência" como `dataDocumento` quando houver no documento
+   um rótulo de emissão/geração ("Data de Emissão", "Data e Hora de Emissão" ou "Data de Geração")
+   com dia, mês e ano completos (dd/MM/yyyy) - esse rótulo de emissão/geração sempre tem prioridade
+   sobre a Competência, mesmo que os dois valores pareçam divergir. Isso vale mesmo quando a
+   Competência está mais legível no documento: legibilidade não é critério de prioridade, o
+   rótulo correto é que decide.
+7. Usar "Data de Competência" como `dataDocumento` SOMENTE quando NÃO houver nenhum rótulo de
+   emissão/geração legível e completo (dd/MM/yyyy) no documento - nesse caso específico de
+   ausência, a Competência (se completa) é o melhor substituto disponível. Ler o ano com atenção
+   redobrada (dígito a dígito) em qualquer uma dessas datas: erros de OCR trocando o último
+   dígito do ano (ex.: "2026" lido como "2025") são comuns e graves, pois geram datas de
+   vencimento incoerentes no fluxo posterior.
 8. Se "Data de Competência" vier incompleta (só mês/ano, ex.: "07/2026", sem o dia - comum quando o
    rótulo indica apenas o mês de referência contábil), NUNCA usar esse valor incompleto como
    `dataDocumento`. Nesse caso, usar a "Data de Geração" (se houver) ou a "Data e Hora de Emissão"

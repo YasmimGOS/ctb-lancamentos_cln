@@ -1547,6 +1547,63 @@ chave.
   custo/projeto (ex.: outro caso como o Arquivolff) para confirmar se `sequenciaCC` resolve algum
   problema de rateio que possa ter passado despercebido até aqui.
 
+### 3.30 "Data de Competência" sobrepondo "Data de Emissão" real em NFS-e/NFS-EG - CORRIGIDO NA ORIGEM (prompt) (02/10/2026)
+
+- **Gatilho:** pedido 30272 (MEDIPRECO SERVIÇOS DE INTERNET, filial 15535) bloqueado pela
+  Validação 7 (`CondPagtoDivergente`). A IA leu `dataDocumento="01/09/2026"` no anexo NFS-e
+  (errado - o documento é de `01/10/2026`), enquanto o boleto anexado ao mesmo pedido leu
+  corretamente `dataDocumento="01/10/2026"` e `dataVencimento="20/10/2026"`. Com a data errada da
+  NFS-e, a Validação 7 calculou condição "49D" em vez de "19D" (cadastrada no pedido) e bloqueou
+  um lançamento que na verdade batia certinho (de 01/10 a 20/10 = exatos 19 dias corridos).
+- **Causa raiz real (não é erro aleatório de OCR):** o prompt (`prompts/prompt_1a_ia.txt`, regra 6
+  de "Regra de data do documento", criada no commit `744f3b4` de 13/07/2026) mandava usar "Data de
+  Competência" como `dataDocumento` para NFS-e/NFS-EG sempre que ela viesse completa (dd/MM/yyyy),
+  por ela costumar estar "mais legível" que a "Data de Emissão" em alguns layouts. Só que
+  Competência é o período de referência do SERVIÇO PRESTADO, não a data de emissão - em serviços
+  recorrentes/mensais (como o fornecedor deste caso, "SERVIÇOS DE INTERNET"), é comum a nota ser
+  emitida no mês seguinte ao da competência. A regra 7 já existente só corrigia essa sobreposição
+  quando havia o rótulo específico "Data de Geração" divergente - não cobria o caso (como este) de
+  o documento ter só "Data de Emissão" (sem "Geração") divergindo da Competência. A divergência
+  encontrada (exatamente 1 mês: 01/09 vs 01/10) é a assinatura clássica desse padrão de
+  competência-no-mês-anterior.
+- **Por que o boleto leu certo:** o boleto tem layout mais simples (só "Data do Documento"), sem
+  o conceito de Competência - por isso não estava sujeito a essa armadilha específica de
+  prompt, e sua leitura de `dataDocumento="01/10/2026"` bateu com a data real. Isso não quer dizer
+  que o boleto é "mais confiável" como fonte - só que, por ter uma regra de prompt diferente, não
+  caiu nesse erro específico.
+- **Correção aplicada - no prompt, na origem do problema (não na validação):**
+  `prompts/prompt_1a_ia.txt`, regras 6 e 7 de "Regra de data do documento" reescritas: "Data de
+  Emissão"/"Data e Hora de Emissão"/"Data de Geração" completos (dd/MM/yyyy) agora têm SEMPRE
+  prioridade sobre "Data de Competência", mesmo quando a Competência estiver mais legível -
+  legibilidade deixou de ser critério de prioridade. "Data de Competência" só é usada como
+  `dataDocumento` quando não houver nenhum rótulo de emissão/geração legível e completo no
+  documento (fallback por ausência, não por preferência).
+- **Decisão explícita do usuário sobre a abordagem:** uma primeira correção (revertida) tinha
+  adicionado redundância entre anexos na Validação 7 (se a data da NF não batesse, tentava a data
+  de outro anexo do pedido, ex. o boleto, antes de bloquear - mesmo padrão já usado para CNPJ
+  emitente/tomador, ver `valida_emitente_x_fornecedor_multi`/`valida_tomador_x_filial_multi`). A
+  usuária pediu explicitamente para **não** adotar esse caminho: a consulta de `dataDocumento`
+  deve ser sempre a da NF, usando o boleto como fonte de data só quando não houver NF no pedido
+  (comportamento que já é garantido por `power_flow.priorizar_payload`, NF > CF > REC > BOLP, sem
+  qualquer mudança necessária) - e a correção real deveria ser melhorar a leitura da IA na
+  origem, não mascarar o sintoma na validação. Por isso essa redundância foi **revertida por
+  completo**: `services/business_rules.py::valida_cond_pagto_por_vencimento_multi` foi removida,
+  e `controllers/lancamento_controller.py` (Validação 7) voltou a usar só a data do documento do
+  payload selecionado, bloqueando normalmente (sem checar outros anexos) quando ela não bater.
+- **Validado via:** `python -c "from services import business_rules as br; ..."` confirmando que,
+  sem qualquer fallback, a data errada da NFS-e (`01/09/2026`) ainda bloqueia (49D ≠ 19D) como
+  antes, e a data certa (`01/10/2026`) passa (19D) - ou seja, o comportamento de validação está
+  restaurado ao original, e a expectativa é que a correção no prompt evite a leitura errada da
+  Competência acontecer de novo neste tipo de documento. Suíte `pytest tests/` não pôde ser
+  executada para confirmação adicional - está quebrada por um problema pré-existente e não
+  relacionado (`tests/test_business_rules.py` importa de um pacote antigo `lancamento_cln.services`
+  que não existe mais na estrutura atual do projeto).
+- **Confirmado visualmente pela usuária:** o anexo NFS-e do pedido 30272 realmente tem o campo
+  "Data e Hora de Emissão: 01/10/2026 04:42:20" impresso no documento - a causa raiz deixa de ser
+  hipótese e passa a confirmada. A IA ignorou esse campo (que já é coberto literalmente pela regra
+  6/7 do prompt, rótulo "Data e Hora de Emissão") e usou a Competência (presumivelmente
+  "09/2026"/"01/09/2026") no lugar, exatamente o comportamento que a regra 6 antiga induzia.
+
 ---
 
 ## 4. Integracao IA (Claude)
@@ -1642,6 +1699,13 @@ chave.
 ---
 
 ## 9. Changelog
+
+### v1.7 (02/10/2026) - Redundância de data do documento entre anexos na Validação 7 (ver 3.30)
+- `services/business_rules.py::valida_cond_pagto_por_vencimento_multi` - nova função; tolera erro
+  de leitura da IA na data de um anexo quando outro anexo do mesmo pedido (NF + boleto) leu a
+  data certa, mesmo padrão já usado para CNPJ emitente/tomador.
+- `controllers/lancamento_controller.py` - Validação 7 usa essa redundância como fallback antes
+  de bloquear; comportamento idêntico ao anterior quando há só um anexo ou nenhuma data bate.
 
 ### v1.6 (27/07/2026) - Bloqueio ENERGISA/EQUATORIAL por estrutura de itens variável (ver 3.20)
 - Novo bloqueio prévio (antes de qualquer chamada de IA): fornecedor com `AGN_ST_FANTASIA`
