@@ -318,6 +318,37 @@ def valida_cond_pagto_por_vencimento(cond_pagto_raw: str, data_documento_br: str
     return ok, esperada
 
 
+def agrupar_nfs_distintas(payloads: list[dict]) -> list[dict]:
+    """Agrupa os payloads de tipo NF (contasPagarTipoDoc comecando com "NF") por numNota
+    distinto - usado para detectar quando o pedido tem mais de uma NF real anexada (fornecedor
+    fez 1 pedido de compra e anexou varias notas, ex: produto + servico).
+
+    Duas NFs com o mesmo numNota (ex: a mesma nota lida em 2 anexos por engano) contam como uma
+    so - só numNota distinto e tratado como NF separada.
+    """
+    distintos: dict[str, dict] = {}
+    for p in payloads:
+        if not str(p.get("contasPagarTipoDoc", "")).startswith("NF"):
+            continue
+        num = str(p.get("numNota", "")).strip()
+        if num and num not in distintos:
+            distintos[num] = p
+    return list(distintos.values())
+
+
+def multiplas_nfs_batem_com_pedido(nfs_distintas: list[dict], valor_pedido: float,
+                                    tolerancia: float = 0.01) -> tuple[bool, float]:
+    """Confere se a soma do valor das NFs distintas bate com o valor total cadastrado no pedido
+    de compra (dentro de uma tolerancia de arredondamento).
+
+    Usado quando ha mais de uma NF no mesmo pedido: se a soma bater, cada NF vira um lancamento
+    separado; se nao bater, o pedido deve ir para execucao manual (decisao da usuaria) - nao da
+    pra saber automaticamente qual NF esta "certa" ou se falta algum documento.
+    """
+    soma = sum(fmt.to_float(p.get("totalNota", "0")) for p in nfs_distintas)
+    return abs(soma - valor_pedido) <= tolerancia, soma
+
+
 def resolver_localizacao_almoxarifado(almoxarifado: str) -> str:
     """TEMPORÁRIO: só usado para aviso/bloqueio manual (ver ALMOXARIFADO_LOCALIZACAO em
     config/settings.py). Retorna "" quando o almoxarifado não está no de-para conhecido."""

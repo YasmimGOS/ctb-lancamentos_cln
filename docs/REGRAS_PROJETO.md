@@ -1604,6 +1604,106 @@ chave.
   6/7 do prompt, rótulo "Data e Hora de Emissão") e usou a Competência (presumivelmente
   "09/2026"/"01/09/2026") no lugar, exatamente o comportamento que a regra 6 antiga induzia.
 
+### 3.31 Múltiplas NFs no mesmo pedido - 1 lançamento por NF, ou execução manual se não bater com o pedido - CORRIGIDO (05/10/2026)
+
+- **Gatilho:** pedido 26423 (TOP 10 PNEUS, filial 46) tem 2 anexos: `NFTOP10.pdf` (NF-E,
+  numNota 000.018.350, R$ 2.980,00 - o produto/pneu) e `NFSTOP10.pdf` (NFS-E, numNota
+  2026000000207, R$ 120,00 - um serviço, provável montagem/balanceamento). O pedido de compra
+  tem 1 único item, cadastrado com `VALOR_TOTAL_ITEM_PEDIDO = TOTAL_PEDIDO = 2.980,00` (só o
+  produto). `services/power_flow.py::priorizar_payload` escolhe só 1 payload por prioridade de
+  tipo (NF > CF > REC > BOLP); como as duas notas têm `contasPagarTipoDoc` começando com "NF",
+  a função pega a primeira da lista só por ordem de chegada - sem lógica deliberada. Resultado
+  confirmado em produção (`logs/ctb-lancamentos_cln_20261002_011307.log` e reproduzido de novo em
+  `logs/.../20261005_133848`): lança só a NF-E (R$ 2.980,00), `Status final: Sucesso`, e a NFS-E
+  de R$ 120,00 é perdida silenciosamente, sem erro nem aviso.
+- **Regra de negócio definida pela usuária:** quando o pedido tem mais de uma NF (ou mais de um
+  boleto - caso ainda não implementado, ver nota abaixo) relacionada à mesma compra:
+  1. Somar o valor de todas as NFs distintas (por `numNota`).
+  2. Comparar com o valor total cadastrado no pedido de compra.
+  3. Se a soma bater com o pedido (dentro de uma tolerância de arredondamento de R$ 0,01): criar
+     um lançamento por NF (2 ou mais lançamentos independentes).
+  4. Se a soma NÃO bater: não lançar nada automaticamente - devolver para execução manual da
+     equipe CLN (não dá pra saber sozinho qual NF está certa ou se falta algum documento).
+  5. Essa regra só vale para 2+ NFs distintas. O caso normal de 1 NF + 1 boleto continua
+     funcionando exatamente como antes (prioridade para os dados da NF, boleto só usado para
+     `dataVencimento`/Validação 7) - não entra nessa lógica nova.
+- **Caso real 26423 sob a nova regra:** soma das NFs = 2.980,00 + 120,00 = 3.100,00, mas o pedido
+  de compra está cadastrado com 2.980,00 - **não bate** - então o correto é ir para execução
+  manual, não lançar só a NF-E como estava acontecendo.
+- **Implementação:**
+  1. `services/business_rules.py::agrupar_nfs_distintas` - nova função. Filtra os payloads cujo
+     `contasPagarTipoDoc` começa com "NF" e agrupa por `numNota` distinto (duas leituras do mesmo
+     numNota contam como 1 NF só).
+  2. `services/business_rules.py::multiplas_nfs_batem_com_pedido` - nova função. Soma o
+     `totalNota` das NFs distintas e compara com o valor do pedido (parâmetro `tolerancia=0.01`).
+  3. `controllers/lancamento_controller.py` (ETAPA 5, seleção de payloads a lançar) - quando há
+     mais de 1 NF distinta (e não é o caso especial VIBRA ENERGIA, que continua com precedência):
+     se a soma bater, `payloads_para_lancar` vira a lista de NFs distintas (1 lançamento por NF,
+     mesmo padrão de "lançamentos independentes" já usado para VIBRA ENERGIA); se não bater,
+     bloqueia com `res.status = "MultiplasNFsDivergentes"`, avisa no Teams com o detalhamento das
+     NFs/somas/valor do pedido, e registra no BD como "Sucesso" (para não reprocessar) - mesmo
+     padrão dos outros bloqueios de execução manual (`ExecucaoManual`, `SenhaProtegidaManual`
+     etc.).
+  4. O valor do pedido de compra é somado a partir de `dados_pedido` (`VALOR_TOTAL_ITEM_PEDIDO`
+     de cada item) - cobre tanto o caso de 1 item único (confirmado pela usuária como o padrão
+     desse cenário) quanto, por segurança, pedidos com mais de um item.
+- **Pendência (NÃO implementada ainda):** a mesma regra "soma bate → N lançamentos separados,
+  senão execução manual" para o caso de **múltiplos boletos** (em vez de múltiplas NFs). Hoje já
+  existe `services/business_rules.py::montar_parcelas_por_boletos`, que trata múltiplos boletos
+  como **parcelas de um único lançamento** (Validação 8) quando a soma bate com o total da nota -
+  um mecanismo diferente do "lançamentos separados" pedido aqui. Perguntado à usuária se são
+  situações diferentes (parcelas = mesma NF parcelada em vários boletos; múltiplos lançamentos =
+  múltiplos boletos de documentos/compras diferentes sem NF) ou se a regra nova deveria substituir
+  a de parcelas - ainda sem resposta. Não mexer nesse mecanismo até a definição.
+- **Validado via:** `python -c "from services import business_rules as br; ..."` reproduzindo os
+  números reais do pedido 26423 (soma 3100.00 ≠ pedido 2980.00 → bloqueia, como esperado), um
+  caso de controle onde a soma bate (gera os lançamentos separados), e o caso normal de 1 NF + 1
+  boleto (não entra na regra nova, `agrupar_nfs_distintas` retorna só 1 NF). Suíte `pytest tests/`
+  não pôde ser executada - mesmo problema pré-existente já registrado na seção 3.30.
+
+### 3.32 CNPJ emitente de marketplace/intermediário - remove fallback que deixava passar e falhava no Mega - CORRIGIDO (05/10/2026)
+
+- **Gatilho:** pedido 325183 (filial 3, fornecedor cadastrado "MAGALU PAGAMENTOS",
+  CNPJ `17.948.578/0001-77`) - a NF-e anexada (`Magalu carrinho.pdf`) foi emitida por
+  "HUM IMPORTADORA E DISTRIBUIDORA DE UTILIDADES DOMESTICAS LTD", CNPJ `27.182.339/0001-02` -
+  uma empresa diferente, típico de compra via marketplace (compra pela Magalu, produto
+  enviado/faturado por um vendedor parceiro da plataforma). O robô passou pela Validação 3 (via
+  fallback explicado abaixo) e tentou lançar; o Mega rejeitou com HTTP 400: `Erro na rotina
+  [adm_pck_nfe.F_ValidaChaveNFE] - Chave de Acesso inválida, a composição da chave de acesso está
+  com valores diferentes do cabeçalho do documento: CNPJ do emitente [27182339000102]`.
+- **Confirmado que NÃO é erro de leitura da IA:** decodificação manual dos 44 dígitos da chave de
+  acesso confirma que ela é internamente válida - dígito verificador (mod 11) bate, e o CNPJ
+  embutido na própria chave (`27182339000102`) é idêntico ao `cnpjEmitente` extraído do cabeçalho
+  do documento pela IA. Ou seja, a IA leu o documento corretamente; a divergência é real (duas
+  empresas genuinamente diferentes), não uma leitura errada.
+- **Causa raiz no nosso código:** a Validação 3 (CNPJ Emitente x Fornecedor,
+  `controllers/lancamento_controller.py::_validar_e_lancar_payload`) tinha uma "última medida":
+  quando nada mais confirmava o CNPJ da NF, consultava o cadastro de fornecedor pelo CNPJ do
+  PRÓPRIO pedido (`cnpj_forn`) e, se o nome fantasia retornado batesse com o do pedido, confiava
+  nesse CNPJ cadastrado e deixava passar (assumindo "a leitura do documento deve estar errada").
+  Esse teste é quase tautológico: o fornecedor cadastrado no próprio pedido quase sempre vai
+  aparecer no Mega sob o próprio nome do pedido - isso não prova nada sobre se o emitente da NF
+  está certo ou errado, só confirma que o cadastro do pedido existe. Resultado: qualquer compra
+  via marketplace/intermediário passava por essa validação e só falhava depois, lá no Mega,
+  gastando uma chamada de IA e uma tentativa de lançamento à toa.
+- **Decisão explícita da usuária:** quando o CNPJ do emitente da NF diverge do fornecedor
+  cadastrado no pedido e não há como confirmar que é erro de leitura (chave de acesso
+  internamente válida, nenhum outro anexo do pedido confirma o CNPJ do fornecedor), bloquear
+  sempre para execução manual, em vez de deixar passar e falhar no Mega.
+- **Correção:** removida a "última medida" (bloco que consultava `cnpj_forn` e confiava no nome
+  fantasia batendo) em `controllers/lancamento_controller.py`. Sem ela, esse cenário cai
+  naturalmente no bloqueio já existente da Validação 3 (`status="CNPJEmitente"`, aviso no Teams
+  com os CNPJs envolvidos) - não foi necessário criar um status novo. As outras duas camadas de
+  confirmação da Validação 3 continuam ativas e não foram alteradas: (1) redundância entre
+  outros anexos do mesmo pedido (`valida_emitente_x_fornecedor_multi` - útil quando um boleto da
+  mesma transação confirma o CNPJ certo) e (2) consulta ao cadastro de fornecedor pelo CNPJ lido
+  no PRÓPRIO documento/anexos (`candidatos_distintos` - confirma quando o CNPJ da NF, apesar de
+  diferente do cadastrado no pedido, está registrado no Mega sob um nome que bate com a fantasia
+  do pedido - esse teste já é específico o suficiente, diferente da "última medida" removida).
+- **Validado via:** revisão de fluxo com os dados reais do pedido 325183 - a consulta ao CNPJ da
+  NF (`27182339000102`) já retornava vazio no Mega (confirmado no log), então nenhuma das duas
+  camadas restantes confirma, e cai direto no bloqueio `CNPJEmitente` como esperado.
+
 ---
 
 ## 4. Integracao IA (Claude)
@@ -1699,6 +1799,23 @@ chave.
 ---
 
 ## 9. Changelog
+
+### v1.9 (05/10/2026) - Remove fallback de CNPJ emitente que deixava passar compras via marketplace (ver 3.32)
+- `controllers/lancamento_controller.py` (Validação 3) - removida a "última medida" que confiava
+  no CNPJ cadastrado no próprio pedido sempre que o nome fantasia batesse - teste pouco
+  discriminante que deixava passar divergências reais de CNPJ (ex: compra via marketplace/
+  intermediário, NF emitida por vendedor parceiro diferente do fornecedor cadastrado) e só
+  falhava depois, no Mega (`adm_pck_nfe.F_ValidaChaveNFE`, HTTP 400). Agora bloqueia direto para
+  execução manual (`status="CNPJEmitente"`, mesmo status já existente).
+
+### v1.8 (05/10/2026) - Múltiplas NFs no mesmo pedido: 1 lançamento por NF ou execução manual (ver 3.31)
+- `services/business_rules.py::agrupar_nfs_distintas` e `::multiplas_nfs_batem_com_pedido` -
+  novas funções. Quando o pedido tem 2+ NFs com numNota distinto, soma os valores e compara com
+  o total cadastrado no pedido de compra.
+- `controllers/lancamento_controller.py` - se a soma bater, lança 1 por NF; se não bater, bloqueia
+  com `status="MultiplasNFsDivergentes"` para execução manual, em vez de lançar só a primeira NF
+  e perder as demais silenciosamente (bug real confirmado no pedido 26423).
+- Pendente: mesma regra para múltiplos boletos (ver nota na seção 3.31).
 
 ### v1.7 (02/10/2026) - Redundância de data do documento entre anexos na Validação 7 (ver 3.30)
 - `services/business_rules.py::valida_cond_pagto_por_vencimento_multi` - nova função; tolera erro

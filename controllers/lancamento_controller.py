@@ -808,10 +808,44 @@ class LancamentoController:
         # Pegar CNPJ emitente do primeiro payload (todos devem ter o mesmo emitente)
         cnpj_emit_final = payloads[0].get("_contexto", {}).get("cnpj_emitente", "") if payloads else ""
 
+        nfs_distintas = br.agrupar_nfs_distintas(payloads)
+
         if cnpj_emit_final == CNPJ_VIBRA_ENERGIA and len(payloads) > 1:
             # VIBRA ENERGIA: cada anexo é um lançamento independente (sem fusão)
             log.info(sanitize_emoji("  ✓ VIBRA ENERGIA com múltiplos anexos: %d lançamento(s) independente(s)"), len(payloads))
             payloads_para_lancar = payloads
+        elif len(nfs_distintas) > 1:
+            # Pedido com mais de uma NF real anexada (numNota distinto) - ex: fornecedor fez 1
+            # pedido de compra e anexou produto + serviço em notas separadas. Só lança 1
+            # lançamento por NF se a soma delas bater com o valor cadastrado no pedido de
+            # compra; se não bater, não dá pra saber automaticamente o que está certo - manda
+            # para execução manual da equipe CLN (decisão explícita da usuária).
+            valor_pedido = sum(fmt.to_float(dp.get("VALOR_TOTAL_ITEM_PEDIDO", "0")) for dp in dados_pedido)
+            bate, soma_nfs = br.multiplas_nfs_batem_com_pedido(nfs_distintas, valor_pedido)
+            if bate:
+                log.info(sanitize_emoji("  ✓ Pedido com %d NFs distintas, soma bate com o pedido de compra: %d lançamento(s) independente(s)"),
+                         len(nfs_distintas), len(nfs_distintas))
+                payloads_para_lancar = nfs_distintas
+            else:
+                log.warning(sanitize_emoji("  ⚠️  Pedido com %d NFs distintas, mas a soma (%s) não bate com o valor do pedido de compra (%s) - execução manual"),
+                            len(nfs_distintas), fmt.format_number(soma_nfs), fmt.format_number(valor_pedido))
+                msg = ("Pedido com mais de uma NF anexada cuja soma não bate com o valor cadastrado no "
+                       "pedido de compra - requer execução manual")
+                detalhes = {
+                    "NFs encontradas": ", ".join(
+                        f"{p.get('numNota', '')} (R$ {p.get('totalNota', '0')})" for p in nfs_distintas),
+                    "Soma das NFs": fmt.format_number(soma_nfs),
+                    "Valor do pedido de compra": fmt.format_number(valor_pedido),
+                }
+                self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
+                self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                    erro=f"Motivo: Multiplas NFs com soma ({fmt.format_number(soma_nfs)}) divergente "
+                                         f"do valor do pedido de compra ({fmt.format_number(valor_pedido)})")
+                res.deve_lancar = False
+                res.status = "MultiplasNFsDivergentes"
+                log.info("  └─ Status final: %s (registrado no BD)", res.status)
+                _flush_avisos_ia_envio(False)
+                return [res]
         else:
             payload_priorizado = power_flow.priorizar_payload(payloads)
             payloads_para_lancar = [payload_priorizado] if payload_priorizado else []
@@ -975,19 +1009,15 @@ class LancamentoController:
                     log.info(sanitize_emoji("  │  ℹ️  CNPJ %s confirmado via cadastro de fornecedor (nome fantasia bate: %s)"), candidato, fantasia_pedido)
                     break
 
-        # Última medida: consulta o cadastro de fornecedor pelo CNPJ do PRÓPRIO pedido
-        # (cnpj_forn) - se o nome fantasia retornado bater com o do pedido, confia no CNPJ
-        # cadastrado no pedido (provavelmente a leitura do documento é que está errada)
-        if not emitente_ok:
-            cnpj_forn_norm = val.normaliza_cnpj(cnpj_forn)
-            dados_forn_pedido = self.bpms.consultar_fornecedor_por_cnpj(cnpj_forn_norm) if cnpj_forn_norm else []
-            nomes_pedido = [d.get("AGN_ST_FANTASIA", "") for d in dados_forn_pedido] + [d.get("AGN_ST_NOME", "") for d in dados_forn_pedido]
-            if br.nome_fornecedor_confere(nomes_pedido, fantasia_pedido):
-                num_cnpj_cadastro = val.normaliza_cnpj(dados_forn_pedido[0].get("NUM_CNPJ", "")) if dados_forn_pedido else ""
-                if num_cnpj_cadastro:
-                    emitente_ok = True
-                    cnpj_confirmado_via_api = num_cnpj_cadastro
-                    log.info(sanitize_emoji("  │  ℹ️  CNPJ do pedido (%s) confirmado via cadastro de fornecedor (nome fantasia bate: %s)"), num_cnpj_cadastro, fantasia_pedido)
+        # NOTA: existiu aqui uma "última medida" que confiava no CNPJ cadastrado no PRÓPRIO
+        # pedido sempre que o nome fantasia batesse - removida (ver docs/REGRAS_PROJETO.md
+        # seção 3.32). Essa checagem é quase tautológica (o fornecedor do pedido quase sempre
+        # está cadastrado sob o próprio nome do pedido) e não distingue erro de leitura da IA de
+        # uma divergência real de CNPJ (ex: compra via marketplace/intermediário, onde o emitente
+        # da NF-e é legitimamente uma empresa diferente da cadastrada no pedido) - nesse segundo
+        # caso, o Mega rejeita o lançamento de qualquer forma (chave de acesso não bate com o
+        # fornecedor cadastrado), então deixar passar aqui só adiava a falha pro Mega. Decisão da
+        # usuária: nesses casos, bloquear para execução manual em vez de tentar lançar.
 
         if not emitente_ok:
             log.warning(sanitize_emoji("  │  ⚠️  CNPJ do emitente divergente - bloqueio ativado"))
