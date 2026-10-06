@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from config import CNPJ_ALUGUEL_IR, CNPJ_APLICACAO_281, CNPJ_VIBRA_ENERGIA, TIPOS_DOC_SERVICO
+from config import (
+    CNPJ_ALUGUEL_IR, CNPJ_APLICACAO_281, CNPJ_CONDOMINIO_SEM_IE, CNPJ_VIBRA_ENERGIA,
+    TIPOS_DOC_SERVICO,
+)
 from utils import formatter as fmt
 from utils import validators as val
 from services import business_rules as br
@@ -118,13 +121,18 @@ def agregar_transacoes_rota_verde(resultados_ia: list[dict]) -> dict:
 
 def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
                 total_nota: str, is_servico: bool, multi_item: bool,
-                is_equatorial: bool = False) -> tuple[dict, float]:
+                is_equatorial: bool = False, zera_icms: bool = False) -> tuple[dict, float]:
     """grupo: linhas de dados_pedido com o mesmo ITEM_SEQUENCIA - representam UM item de fato,
     rateado entre um ou mais centros de custo/projetos (uma linha por rateio).
 
     is_equatorial: teste isolado (17/07/2026, pedido 25998/nota 198531151) - NÃO altera o
     comportamento de nenhum outro fornecedor/documento (default False preserva 100% da lógica
-    anterior). Ver docs/REGRAS_PROJETO.md secao 3.13."""
+    anterior). Ver docs/REGRAS_PROJETO.md secao 3.13.
+
+    zera_icms: True quando o tomador/filial é o Condomínio Shopping Center Cerrado (CNPJ
+    24357174000174) - sem Inscrição Estadual, não se credita de ICMS mesmo quando o fornecedor
+    destaca o imposto na NF. Zera baseIcms/percentualIcms/valorIcms do item (decisão explícita
+    do analista financeiro, 06/10/2026). Ver docs/REGRAS_PROJETO.md secao 3.35."""
     dado_pedido = grupo[0]
     is_aluguel = cnpj_emitente == CNPJ_ALUGUEL_IR
     is_vibra = cnpj_emitente == CNPJ_VIBRA_ENERGIA
@@ -205,7 +213,7 @@ def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
         perc_irff = perc_ou_calc("totalIRRF", "percentualIRFF", base_fiscal_dec)
 
     base_fmt = fmt.format_number(base_fiscal_dec)
-    base_icms = "0" if is_servico else base_fmt
+    base_icms = "0" if (is_servico or zera_icms) else base_fmt
     base_ipi = "0" if is_servico else base_fmt
 
     # Template completo de itensReceb (segue o Power Automate Cloud)
@@ -231,8 +239,8 @@ def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
         "valorOutrosIPI": "0",
         "valorRecuperadoIPI": "0",
         "baseIcms": base_icms,
-        "percentualIcms": perc_ou_calc("valorICMS", "percentualIcms", base_fiscal_dec),
-        "valorIcms": valor_ou_calc("valorICMS", "percentualIcms", base_fiscal_dec),
+        "percentualIcms": "0.00" if zera_icms else perc_ou_calc("valorICMS", "percentualIcms", base_fiscal_dec),
+        "valorIcms": "0.00" if zera_icms else valor_ou_calc("valorICMS", "percentualIcms", base_fiscal_dec),
         "valorIsentoIcms": "0",
         "valorOutrosIcms": "0",
         "valorIcmsRecupera": "0",
@@ -334,6 +342,8 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
                    is_equatorial: bool = False) -> tuple[dict, bool, dict | None]:
     is_aluguel = cnpj_emitente == CNPJ_ALUGUEL_IR
     is_servico = br.eh_documento_servico(tipo_doc, TIPOS_DOC_SERVICO)
+    cnpj_filial_pedido = val.normaliza_cnpj(str(_g(dados_pedido[0] if dados_pedido else {}, "CNPJ_CPF_FILIAL", default="")))
+    zera_icms = cnpj_filial_pedido == CNPJ_CONDOMINIO_SEM_IE
     # Agrupa linhas de rateio (mesmo ITEM_SEQUENCIA) num único item - qualquer pedido rateado entre
     # vários centros de custo/projetos vem com uma linha de dados_pedido por rateio, e virar um
     # itensReceb por linha gera chave duplicada no Mega (Constraint PK_EST_ITENSRECEB). Não é
@@ -354,7 +364,7 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     bloqueia_7d = False
     for grupo in grupos_item:
         item, base_dec = montar_item(grupo, ia, num_nota, cnpj_emitente, total_nota_ia, is_servico, multi_item,
-                                      is_equatorial=is_equatorial)
+                                      is_equatorial=is_equatorial, zera_icms=zera_icms)
         itens.append(item)
         soma += base_dec
         cond = str(_g(grupo[0], "COND_PAGTO", default="")) or str(pedido_lista.get("COND_ST_CODIGO", ""))
@@ -406,7 +416,13 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
         # Preferir o "VALOR TOTAL DOS PRODUTOS" (bruto) lido pela IA; só cair para a soma dos
         # itens do pedido (já líquida) quando a IA não tiver identificado esse valor.
         valor_merc_ia = fmt.to_float(ia.get("valorMercadoria", "0"))
-        valor_mercadoria = fmt.format_number(valor_merc_ia) if valor_merc_ia > 0 else fmt.format_number(soma)
+        if valor_merc_ia > 0:
+            valor_merc_ia = br.corrigir_valor_mercadoria_bruto_nf(
+                valor_merc_ia, fmt.to_float(ia.get("valorTotalDocumento", "0")),
+                fmt.to_float(ia.get("valorDescontoGeral", "0")))
+            valor_mercadoria = fmt.format_number(valor_merc_ia)
+        else:
+            valor_mercadoria = fmt.format_number(soma)
 
     # valorParcela = soma (valor cadastrado no pedido de compra, VALOR_TOTAL_ITEM_PEDIDO), NÃO
     # valorMercadoria (correção de 17/07/2026 - a regra "valorParcela = valorMercadoria sempre"
@@ -438,7 +454,7 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     tipo_doc_final = br.ajustar_bolp_detran(tipo_doc)
     serie = br.resolver_serie(tipo_doc, ia.get("serie", ""), ia.get("chaveAcesso", ""), cnpj_emitente)
     chave = br.resolver_chave_acesso(tipo_doc, ia.get("chaveAcesso", ""))
-    base_icms_raiz = "0" if is_servico else str(ia.get("baseICMS", "0.00"))
+    base_icms_raiz = "0" if (is_servico or zera_icms) else str(ia.get("baseICMS", "0.00"))
 
     # valorICMS da raiz: usar o valor da IA somente se for um float valido (fmt.to_float retorna
     # 0.0 para lixo como "92.750.00" - dois pontos, comum quando a IA converte "92.750,00" trocando
@@ -446,13 +462,18 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     # percentual x base, igual ja se faz no item (montar_item::valor_ou_calc) - caso real: pedido
     # 320872/nota 241029, Mega rejeitou com 400 (RCB_RE_VLICMS nao e float valido) porque a raiz
     # repassava o texto malformado da IA sem normalizar, enquanto o item ja saia certo (92750.00).
-    valor_icms_ia = fmt.to_float(ia.get("valorICMS", "0"))
-    if valor_icms_ia > 0:
-        valor_icms_raiz = fmt.format_number(valor_icms_ia)
+    # zera_icms (secao 3.35): tomador sem Inscricao Estadual nao se credita de ICMS - forca "0.00"
+    # independente do que a IA tenha extraido.
+    if zera_icms:
+        valor_icms_raiz = "0.00"
     else:
-        base_icms_calc = fmt.to_float(ia.get("baseICMS", "0"))
-        perc_icms_calc = fmt.to_float(ia.get("percentualIcms", "0"))
-        valor_icms_raiz = fmt.format_number(base_icms_calc * perc_icms_calc / 100) if base_icms_calc > 0 and perc_icms_calc > 0 else "0.00"
+        valor_icms_ia = fmt.to_float(ia.get("valorICMS", "0"))
+        if valor_icms_ia > 0:
+            valor_icms_raiz = fmt.format_number(valor_icms_ia)
+        else:
+            base_icms_calc = fmt.to_float(ia.get("baseICMS", "0"))
+            perc_icms_calc = fmt.to_float(ia.get("percentualIcms", "0"))
+            valor_icms_raiz = fmt.format_number(base_icms_calc * perc_icms_calc / 100) if base_icms_calc > 0 and perc_icms_calc > 0 else "0.00"
 
     tipo_preco = str(_g(dados_pedido[0] if dados_pedido else {}, "TIPO_PRECO", default=""))
     centro_custo = str(_g(dados_pedido[0] if dados_pedido else {}, "CC_RATEIO", "CC_PADRAO", default=""))

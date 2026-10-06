@@ -257,11 +257,15 @@ chave.
 - **Acao:** NAO lancar + notificar Teams
 - **Mensagem:** "Pedido {pdc}: CNPJ do tomador divergente (Filial: {cnpj_fil} / Tomador: {cnpj_tom})."
 
-### 3.5 Condicao Pagamento <= 7 dias
-- **Trigger:** Vencimento da parcela 1 <= 7 dias da data atual
+### 3.5 Vencimento <= 7 dias (contado de hoje) - requer autorizacao do financeiro
+- **Trigger:** Vencimento da parcela 1 (calculado a partir da data do documento + condicao de
+  pagamento) ja esta vencido OU vence em menos de 7 dias corridos, contados de HOJE (data do
+  lancamento) - ver correcao em 3.33.
 - **Excecao:** Aluguel IR (CNPJ `03397056000110`)
-- **Acao:** NAO lancar + notificar Teams + registrar BD
-- **Mensagem:** "Pedido {pdc}: condicao de pagamento <= 7 dias. Lancamento bloqueado."
+- **Acao:** NAO lancar + notificar Teams pedindo autorizacao do financeiro + registrar BD
+- **Mensagem:** "Vencimento {já ultrapassado|em menos de 7 dias} ({data}). Requer autorização do
+  financeiro antes de lançar"
+- **Liga/desliga:** `BLOQUEIO_COND_PAGTO_7DIAS_ATIVO` no `config/.env` (ver historico em 3.24).
 
 ### 3.6 PIS/COFINS reconhecidos - PALIATIVO PROVISORIO (ATIVO)
 
@@ -1393,13 +1397,11 @@ chave.
   3. `controllers/lancamento_controller.py` (Validação 6) - quando a flag está `False`, pula a
      checagem inteira (loga aviso e segue direto para a Validação 7). Com a flag em `true`
      (default), o comportamento é idêntico ao anterior - retrocompatível.
-- **PALIATIVO PROVISÓRIO - remover/ajustar quando:** a usuária pediu isso explicitamente "a
-  caráter de teste" - não é uma decisão definitiva de negócio. Voltar
-  `BLOQUEIO_COND_PAGTO_7DIAS_ATIVO=True` no `config/.env` assim que o teste terminar, restaurando o
-  bloqueio original de condição de pagamento ≤ 7 dias para todos os pedidos.
-- **Atenção:** enquanto essa flag estiver `False`, TODOS os pedidos com condição de pagamento ≤ 7
-  dias lançam automaticamente (não é uma exceção pontual do pedido 104) - inclusive casos que a
-  regra original foi criada para pegar (ver seção 2.4/3.5 para o motivo original do bloqueio).
+- **PALIATIVO PROVISÓRIO - ENCERRADO (06/10/2026):** a usuária pediu isso explicitamente "a
+  caráter de teste" - não era uma decisão definitiva de negócio. Reativado
+  (`BLOQUEIO_COND_PAGTO_7DIAS_ATIVO=True`) em 06/10/2026 como parte da correção da seção 3.33,
+  depois que o pedido 325947 expôs o bug que essa flag estava mascarando (vencimento já vencido
+  lançado sem bloqueio nenhum, já que a flag estava desligada).
 
 ### 3.25 PIS/COFINS/CSLL mapeados errado em layout novo DANFSe v2.0 - CORRIGIDO (23/09/2026)
 
@@ -1703,6 +1705,136 @@ chave.
 - **Validado via:** revisão de fluxo com os dados reais do pedido 325183 - a consulta ao CNPJ da
   NF (`27182339000102`) já retornava vazio no Mega (confirmado no log), então nenhuma das duas
   camadas restantes confirma, e cai direto no bloqueio `CNPJEmitente` como esperado.
+
+### 3.33 Vencimento calculado contra a data errada (documento, não hoje) + lançamento sem autorização do financeiro - CORRIGIDO (06/10/2026)
+
+- **Gatilho:** pedido 325947 (filial 3, fornecedor Bellas Placas, NF-e 5763, emissão 25/09/2026,
+  condição de pagamento "06D"). O vencimento calculado da parcela 1 ficou 01/10/2026, mas o
+  pedido só foi processado pelo robô em 06/10/2026 (atraso de fila/processamento) - ou seja, o
+  lançamento foi enviado ao Mega com vencimento **5 dias no passado** em relação à data do
+  lançamento (`dataMovimento`). Analistas financeiros reportaram que vencimento nunca pode ficar
+  igual ou anterior à data de entrada/lançamento - tem que ser sempre pelo menos 1 dia à frente.
+- **Causa raiz nº 1 - bug de cálculo:** `services/business_rules.py::calcular_deve_lancar_por_vencimento`
+  (Validação 6, seção 3.5) comparava o vencimento contra a **data do documento**
+  (`data_documento_br`) em vez de contra **hoje**. Como o vencimento também é calculado a partir
+  da data do documento + N dias da condição de pagamento, `dias_ate(vencimento, data_documento)`
+  sempre dava exatamente N (o próprio número da condição de pagamento) - a validação nunca
+  conseguia detectar um vencimento que já tinha passado por atraso no processamento, porque não
+  olhava a data atual em nenhum momento.
+- **Causa raiz nº 2 - proteção desligada:** a Validação 6 estava desativada em produção desde a
+  seção 3.24 (`BLOQUEIO_COND_PAGTO_7DIAS_ATIVO=False`, paliativo "a caráter de teste" de
+  23/09/2026 que nunca foi revertido). Mesmo sem o bug nº 1, nada seria bloqueado.
+- **Decisão explícita da usuária (06/10/2026):** quando o vencimento calculado já está vencido ou
+  vence em menos de 7 dias (contados de hoje), o robô deve bloquear o lançamento automático e
+  pedir autorização do financeiro - não deve lançar sozinho nem "empurrar" a data
+  silenciosamente.
+- **Correção:**
+  1. `services/business_rules.py::calcular_deve_lancar_por_vencimento` - reescrita para comparar
+     o vencimento contra `fmt.hoje_iso(tz)` (data de hoje/lançamento), não contra a data do
+     documento. Reaproveita `vencimento_parcela_1`/`normaliza_cond_pagto` para ficar consistente
+     com o cálculo real da parcela (inclusive condições em meses, "NNM", que o código antigo
+     ignorava).
+  2. `services/business_rules.py::vencimento_e_dias_restantes` - nova função auxiliar que retorna
+     o vencimento calculado e os dias restantes (negativo = já vencido), usada pelo controller
+     para montar a mensagem/detalhes do aviso.
+  3. `controllers/lancamento_controller.py` (Validação 6) - mensagem/detalhes do Teams
+     reescritos para deixar explícito que **requer autorização do financeiro** antes de lançar
+     (em vez de só "lançamento bloqueado"), incluindo o vencimento calculado e os dias restantes.
+     Novo status: `VencimentoRequerAutorizacaoFinanceiro` (antes `CondPagto7Dias`).
+  4. `config/.env::BLOQUEIO_COND_PAGTO_7DIAS_ATIVO=True` - reativado (ver seção 3.24).
+- **Validado via:** reprodução manual do cálculo com os dados reais do pedido 325947 (emissão
+  25/09, cond. "06D", hoje simulado 06/10) - vencimento calculado 01/10, dias restantes -5
+  (vencido), validação agora bloqueia e pede autorização do financeiro como esperado.
+
+### 3.34 valorMercadoria (raiz) de NF-e de mercadoria lançado líquido em vez de bruto, apesar do desconto extraído corretamente - CORRIGIDO (06/10/2026)
+
+- **Gatilho:** pedido 325961 (filial 3, fornecedor Farmatec, NF-e 12285). O analista financeiro
+  identificou que o valor lançado como `valorMercadoria` ficou errado: a IA extraiu
+  `valorTotalDocumento`="1565.28" (líquido, bate com o boleto/valor pago) e
+  `valorDescontoGeral`="112.32" (correto), mas também devolveu `valorMercadoria`="1565.28" - ou
+  seja, copiou o líquido para o campo que deveria conter o bruto ("VALOR TOTAL DOS PRODUTOS").
+  Valor correto segundo o analista: 1677.60 (= 1565.28 + 112.32).
+- **Causa raiz:** apesar do `prompts/prompt_1a_ia.txt` já instruir corretamente (Regra de Ouro §4:
+  `valorMercadoria` = bruto de "VALOR TOTAL DOS PRODUTOS"; conferência obrigatória §(linhas
+  739-752): `valorMercadoria − valorDescontoGeral` deve ≈ `valorTotalDocumento`), a IA não seguiu
+  essa regra neste documento - devolveu um `valorMercadoria` que falha a própria conferência
+  (1565.28 − 112.32 = 1452.96 ≠ 1565.28). `services/etl_service.py::montar_payload` (branch de
+  mercadoria comum, não-serviço/não-aluguel) usava `ia.get("valorMercadoria")` diretamente sem
+  nenhuma verificação de consistência.
+- **Correção:** nova função pura `services/business_rules.py::corrigir_valor_mercadoria_bruto_nf`
+  - detecta exatamente essa inconsistência (valorMercadoria ≈ valorTotalDocumento E
+  valorDescontoGeral > 0) e reconstrói o bruto somando o desconto de volta
+  (`valorMercadoria_corrigido = valorMercadoria + valorDescontoGeral`), espelhando a própria
+  conferência do prompt. Quando a IA já extraiu um bruto diferente do líquido (caso comum/sem
+  bug), a função não altera nada. Aplicada em `montar_payload` só no branch de mercadoria comum -
+  não afeta serviço (seção 3.9, usa `soma`/pedido) nem Aluguel IR (override próprio).
+  `valorParcela`/`totalNota` (o que efetivamente será pago) **não mudam** - continuam o líquido
+  (1565.28), que é o valor correto a pagar (bate com o boleto). Só o campo informativo
+  `valorMercadoria` da raiz passa a refletir o bruto real da NF.
+- **Validado via:** reprodução com `montar_payload` usando os dados reais do pedido 325961/nota
+  12285 - `valorMercadoria` (raiz) = 1677.60 (antes 1565.28), `valorParcela`/`totalNota`
+  continuam 1565.28 (sem regressão no valor pago).
+- **Pendência manual:** o lançamento já realizado (transação Mega 8826695, pk
+  `53;1;2;G;53;1;239938;F;12285;01/10/2026`) ficou com `valorMercadoria` incorreto (1565.28) -
+  avaliar se precisa de correção manual no Mega (o valor pago/`valorParcela` está correto, o
+  problema é só no campo informativo de bruto).
+- **Fora de escopo desta correção:** os campos de base fiscal da raiz (`baseICMS`) e os valores/
+  bases por item em `itensReceb` (sempre sourced do pedido de compra, não da IA) não foram
+  alterados - o pedido do analista foi especificamente sobre `valorMercadoria`.
+- **ATUALIZAÇÃO (06/10/2026) - causa raiz mais provável identificada:** a usuária observou que o
+  rótulo impresso na NF 12285 aparece truncado como "VALOR TOTAL DOS" (sem a palavra "PRODUTOS"
+  visível) - layout comum em DANFEs com coluna estreita no bloco "Cálculo do Imposto", onde o
+  rótulo completo quebra em duas linhas ou é cortado pela borda da tabela. A regra 4 do
+  `prompts/prompt_1a_ia.txt` exigia o termo completo "VALOR TOTAL DOS PRODUTOS" para disparar a
+  extração do bruto; sem reconhecer a variante truncada, a IA provavelmente caiu na regra 6
+  ("termo não claro → copiar o líquido"), que é exatamente o sintoma observado. Reforçada a regra
+  4 do prompt para tratar "VALOR TOTAL DOS", "VALOR TOTAL DOS PROD." e variações
+  truncadas/abreviadas como equivalentes ao termo completo. A correção de código
+  (`corrigir_valor_mercadoria_bruto_nf`) continua como segunda camada de defesa, independente de
+  o prompt reconhecer o rótulo ou não.
+
+### 3.35 ICMS não deve ser lançado para tomador sem Inscrição Estadual (Condomínio Shopping Center Cerrado) - CORRIGIDO (06/10/2026)
+
+- **Gatilho:** pedidos 6613 e 6612 (filial 235758, fornecedor Panificadora Pão Santo Antônio,
+  tomador CONDOMÍNIO SHOPPING CENTER CERRADO CNPJ `24.357.174/0001-74`). Ambos lançados com
+  `baseICMS`/`valorICMS` preenchidos (308.93/58.70 e 328.56/62.42 respectivamente, transações
+  Mega 8826781 e 8826855). O analista financeiro informou: "condomínio não puxa ICMS, mesmo
+  tendo na nota - ela não tem Inscrição Estadual".
+- **Entendimento da orientação (confirmado pela usuária):** o fornecedor é contribuinte normal de
+  ICMS e destaca o imposto na NF independente de quem compra (obrigação do emitente). O
+  CONDOMÍNIO (entidade por trás da filial 235758, quem efetivamente compra) não aproveita esse
+  ICMS porque **não é contribuinte do imposto**: não tem Inscrição Estadual e não vende
+  mercadoria, logo não tem débito de ICMS próprio para compensar com o crédito da compra. Sem
+  débito a compensar, não há crédito a escriturar - o ICMS destacado na nota entra, para o
+  condomínio, como custo normal, não como tributo recuperável. Por isso o valor TOTAL do item
+  (incluindo a parcela que seria o ICMS) vai inteiro para a despesa - `valorMercadoria`/bases do
+  item continuam vindo do valor total cadastrado no pedido (ex.: 933.69), sem nenhuma redução;
+  só os campos de ICMS em si (`baseIcms`/`percentualIcms`/`valorIcms`) são zerados, para não
+  escriturar um crédito que o condomínio não pode tomar.
+- **Decisão explícita da usuária:** zerar `baseICMS`/`percentualIcms`/`valorIcms` (raiz e item)
+  quando o CNPJ da filial/tomador for esse condomínio especificamente - não uma regra geral para
+  "qualquer tomador sem Inscrição Estadual" (não há como identificar isso automaticamente a
+  partir dos dados do pedido hoje), só esse CNPJ cadastrado via lista (mesmo padrão já usado para
+  Aluguel IR/Vibra Energia/Aplicação 281).
+- **Correção:**
+  1. `config/settings.py::CNPJ_CONDOMINIO_SEM_IE = "24357174000174"` - novo CNPJ especial.
+  2. `services/etl_service.py::montar_payload` - calcula `zera_icms` comparando o
+     `CNPJ_CPF_FILIAL` do pedido (não o emitente) contra essa constante.
+  3. `services/etl_service.py::montar_item` - novo parâmetro `zera_icms`; quando `True`, força
+     `baseIcms="0"`, `percentualIcms="0.00"`, `valorIcms="0.00"` no item, substituindo o cálculo
+     normal via `valor_ou_calc`/`perc_ou_calc` (que repassaria o valor absoluto da IA mesmo com a
+     base zerada).
+  4. Raiz do payload (`baseICMS`/`valorICMS`) recebe o mesmo tratamento, com precedência sobre o
+     cálculo normal (incluindo o fallback de recalcular por base×percentual).
+  5. Nenhum outro campo (IPI, PIS, COFINS, ISS etc.) foi alterado - a orientação do analista foi
+     especificamente sobre ICMS.
+- **Validado via:** reprodução com `montar_payload` usando os dados reais do pedido 6612/nota
+  932 - com filial do condomínio, `baseICMS`/`valorICMS` saem "0"/"0.00" (antes 328.56/62.42);
+  com uma filial de controle (CNPJ diferente, mesmo fornecedor/NF), os valores continuam
+  328.56/62.42 - sem regressão para outros tomadores.
+- **Pendência manual:** os dois lançamentos já realizados para esse tomador (transações Mega
+  8826781/pedido 6613/nota 936 e 8826855/pedido 6612/nota 932) ficaram com ICMS indevidamente
+  preenchido - avaliar correção manual no Mega.
 
 ---
 

@@ -117,10 +117,10 @@ class Settings(BaseModel):
     # resolvida na origem.
     tolerancia_dias_cond_pagto: int = int(os.getenv("TOLERANCIA_DIAS_COND_PAGTO", "1") or "0")
 
-    # PALIATIVO PROVISÓRIO DE TESTE (ver docs/REGRAS_PROJETO.md secao 3.24): liga/desliga a
-    # Validacao 6 (Condicao de Pagamento <= 7 dias). True = bloqueio ativo (comportamento padrao,
-    # bloqueia lancamento e manda para tratativa manual). False = desativa o bloqueio (documento
-    # com condicao <= 7 dias lanca normalmente) - usar apenas durante periodo de teste explicito.
+    # Liga/desliga a Validacao 6 (Vencimento da parcela 1 <= 7 dias, contado de HOJE - ver
+    # docs/REGRAS_PROJETO.md secao 3.5/3.33). True = bloqueio ativo (comportamento padrao,
+    # bloqueia lancamento e exige autorizacao do financeiro). False = desativa o bloqueio
+    # (documento com vencimento vencido/proximo lanca normalmente).
     bloqueio_cond_pagto_7dias_ativo: bool = _bool(os.getenv("BLOQUEIO_COND_PAGTO_7DIAS_ATIVO", "true"))
 
     @property
@@ -208,6 +208,10 @@ CNPJ_ALUGUEL_IR = "03397056000110"
 CNPJ_VIBRA_ENERGIA = "34274233030605"
 CNPJ_APLICACAO_281 = "04554425000120"
 CNPJ_EQUATORIAL = "00316622501205"
+# Condominio Shopping Center Cerrado - sem Inscricao Estadual, nao se credita de ICMS mesmo quando
+# o fornecedor destaca o imposto na NF (decisao explicita do analista financeiro, 06/10/2026 -
+# ver docs/REGRAS_PROJETO.md secao 3.35). CNPJ da FILIAL/tomador, nao do emitente.
+CNPJ_CONDOMINIO_SEM_IE = "24357174000174"
 
 # Prestadores de servico confirmados como sediados em Goiania (empresa, nao o local do servico -
 # ver prompts/prompt_1a_ia.txt regra 5), usados para corrigir tipoDocFiscal de "NFS-E" para

@@ -114,6 +114,25 @@ def aplicar_iss_do_valor_retido(ia: dict, extra: dict) -> dict:
     return ia
 
 
+def corrigir_valor_mercadoria_bruto_nf(valor_mercadoria_ia: float, valor_total_documento: float,
+                                        valor_desconto_geral: float) -> float:
+    """Reconstroi o valor bruto ("VALOR TOTAL DOS PRODUTOS") de NF-e/DANFE quando a IA devolveu o
+    valor liquido (valorTotalDocumento) em valorMercadoria por engano, apesar de ter extraido o
+    desconto corretamente (ver docs/REGRAS_PROJETO.md secao 3.34).
+
+    Detecta pela inconsistencia matematica com a propria "Conferencia obrigatoria" do
+    prompts/prompt_1a_ia.txt: bruto - desconto deve ser igual ao liquido. Se valorMercadoria ja
+    vier igual ao liquido (dentro de 0.05 de tolerancia de arredondamento) e houver desconto > 0,
+    a IA nao somou o desconto de volta ao bruto - reconstroi aqui. Se valorMercadoria ja divergir
+    do liquido, a IA ja extraiu um bruto distinto corretamente - nao sobrescrever.
+    """
+    if valor_desconto_geral <= 0:
+        return valor_mercadoria_ia
+    if abs(valor_mercadoria_ia - valor_total_documento) > 0.05:
+        return valor_mercadoria_ia
+    return valor_mercadoria_ia + valor_desconto_geral
+
+
 def precisa_retificar_iss_nao_retido(ia: dict, extra: dict) -> bool:
     if iss_extra_retido(extra):
         return False
@@ -265,18 +284,35 @@ def bloqueia_por_cond_pagto_7dias(cond_pagto_raw: str) -> bool:
     return prefixo.isdigit() and int(prefixo) <= 7
 
 
+def vencimento_e_dias_restantes(data_documento_br: str, cond_pagto_raw: str, tz: str) -> tuple[str, int]:
+    """Calcula o vencimento da parcela 1 e quantos dias corridos faltam a partir de HOJE
+    (data do lancamento) ate esse vencimento. Dias negativos = vencimento ja passado."""
+    cond_norm = normaliza_cond_pagto(cond_pagto_raw)
+    venc_br = vencimento_parcela_1(data_documento_br, cond_norm)
+    venc_iso = fmt.data_br_para_iso(venc_br)
+    if not venc_iso:
+        return venc_br, 9999
+    return venc_br, fmt.dias_ate(venc_iso, fmt.hoje_iso(tz))
+
+
 def calcular_deve_lancar_por_vencimento(cnpj_emitente: str, data_documento_br: str, cond_pagto_raw: str, tz: str) -> bool:
+    """Retorna False quando o vencimento da parcela 1 ja esta vencido ou vence em menos de 7
+    dias corridos contados de HOJE (data do lancamento) - nesses casos, requer autorizacao do
+    financeiro antes de lancar (docs/REGRAS_PROJETO.md secao 3.5).
+
+    Correcao de 06/10/2026: a versao anterior comparava o vencimento contra a DATA DO DOCUMENTO
+    em vez de contra hoje, o que so reproduzia o proprio numero da condicao de pagamento (ex.:
+    "06D" sempre dava "6 dias") e nunca detectava um vencimento que ja tinha passado por atraso
+    no processamento (caso real: pedido 325947, emissao 25/09 + 06D = vencimento 01/10, lancado
+    em 06/10 - ja vencido havia 5 dias, mas a validacao antiga nao percebia isso).
+    """
     if val.normaliza_cnpj(cnpj_emitente) == CNPJ_ALUGUEL_IR:
         return True
-    s = (cond_pagto_raw or "").strip().upper()
-    dias_txt = s[:-1] if (len(s) > 1 and s[-1] == "D") else ""
-    if not dias_txt.isdigit():
+    cond_norm = normaliza_cond_pagto(cond_pagto_raw)
+    if unidade_cond_pagto(cond_norm) not in ("D", "M"):
         return True
-    # Sem data de emissão extraída do documento, usar hoje como referência.
-    data_base_br = data_documento_br if fmt.data_br_para_iso(data_documento_br) else fmt.hoje_br(tz)
-    data_base_iso = fmt.data_br_para_iso(data_base_br)
-    venc_iso = fmt.data_br_para_iso(fmt.add_dias_br(data_base_br, int(dias_txt)))
-    return not fmt.dias_ate(venc_iso, data_base_iso) <= 7
+    _, dias_restantes = vencimento_e_dias_restantes(data_documento_br, cond_pagto_raw, tz)
+    return dias_restantes > 7
 
 
 def calcular_cond_pagto_por_vencimento(data_documento_br: str, data_vencimento_br: str) -> str:

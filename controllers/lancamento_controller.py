@@ -1101,32 +1101,41 @@ class LancamentoController:
             return res
         log.info(sanitize_emoji("  │  ✓ Chave de acesso válida (ou não exigida para este tipo de documento)"))
 
-        # Validação 6: Condição de Pagamento ≤ 7 dias
+        # Validação 6: Vencimento já vencido ou a menos de 7 dias (contado de HOJE) - requer
+        # autorização do financeiro antes de lançar (docs/REGRAS_PROJETO.md secao 3.5).
         if not self.s.bloqueio_cond_pagto_7dias_ativo:
-            log.info("  ├─ Validação 6: Cond. Pagamento ≤ 7 dias - paliativo DESATIVADO "
+            log.info("  ├─ Validação 6: Vencimento ≤ 7 dias - paliativo DESATIVADO "
                      "(BLOQUEIO_COND_PAGTO_7DIAS_ATIVO=False no .env), pulando")
         else:
-            log.info("  ├─ Validação 6: Condição de Pagamento ≤ 7 dias...")
+            venc_calc, dias_restantes = br.vencimento_e_dias_restantes(
+                contexto["data_documento"], contexto["cond_pagto"], self.s.timezone)
+            log.info("  ├─ Validação 6: Vencimento ≤ 7 dias (contado de hoje)...")
             log.info("  │  ├─ Data Documento: %s", contexto["data_documento"])
             log.info("  │  ├─ Cond. Pagamento: %s", contexto["cond_pagto"])
+            log.info("  │  ├─ Vencimento calculado: %s", venc_calc)
+            log.info("  │  ├─ Dias restantes (hoje -> vencimento): %s", dias_restantes)
             log.info("  │  └─ Bloqueio 7d (item): %s", contexto["bloqueia_7d"])
             deve_por_venc = br.calcular_deve_lancar_por_vencimento(
                 contexto["cnpj_emitente"], contexto["data_documento"], contexto["cond_pagto"], self.s.timezone)
             if contexto["bloqueia_7d"] or not deve_por_venc:
-                log.warning(sanitize_emoji("  │  ⚠️  Condição de pagamento ≤ 7 dias - bloqueio ativado"))
-                msg = "Condição de pagamento ≤ 7 dias. Lançamento bloqueado"
+                situacao = "já ultrapassado" if dias_restantes < 0 else "em menos de 7 dias"
+                log.warning(sanitize_emoji("  │  ⚠️  Vencimento %s - requer autorização do financeiro"), situacao)
+                msg = f"Vencimento {situacao} ({venc_calc}). Requer autorização do financeiro antes de lançar"
                 detalhes = {
                     "Data do documento": contexto["data_documento"],
-                    "Condição de pagamento": contexto["cond_pagto"]
+                    "Condição de pagamento": contexto["cond_pagto"],
+                    "Vencimento calculado": venc_calc,
+                    "Dias restantes até o vencimento": str(dias_restantes),
                 }
                 self.teams.aviso(msg, pedido=pdc, tipo_negocio=True, detalhes_extra=detalhes)
                 # Registrar no BD como sucesso para não reprocessar
-                self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd, erro="Motivo: Condição de pagamento ≤ 7")
+                self.bpms.registrar(self.id_disparo, "Sucesso", num_pedido_bd,
+                                    erro=f"Motivo: Vencimento {situacao} - requer autorização do financeiro")
                 res.deve_lancar = False
-                res.status = "CondPagto7Dias"
+                res.status = "VencimentoRequerAutorizacaoFinanceiro"
                 log.info("  └─ Status final: %s (registrado no BD)", res.status)
                 return res
-        log.info(sanitize_emoji("  │  ✓ Condição de pagamento válida (> 7 dias)"))
+        log.info(sanitize_emoji("  │  ✓ Vencimento válido (> 7 dias)"))
 
         # Validação: Condição de Pagamento x Vencimento do Boleto
         log.info("  ├─ Validação 7: Condição de Pagamento x Vencimento do Boleto...")

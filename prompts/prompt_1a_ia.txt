@@ -726,6 +726,15 @@ Valor total do documento e Valores de Mercadoria/Bases:
    e `baseCSLL` DEVEM receber exatamente o valor bruto contido nesse rótulo (ex: "91257.00").
    Nunca subtraia descontos, abatimentos ou valores de ICMS desonerado destes campos se o termo
    "VALOR TOTAL DOS PRODUTOS" estiver presente no arquivo lido.
+   - ARMADILHA de rótulo truncado/quebrado: em muitos layouts de DANFE (coluna estreita no bloco
+     "Cálculo do Imposto"), o rótulo aparece cortado ou quebrado em duas linhas, mostrando só
+     "VALOR TOTAL DOS" (sem a palavra "PRODUTOS" visível, que fica abreviada, cortada pela borda
+     da tabela, ou impressa numa linha abaixo). Trate "VALOR TOTAL DOS", "VALOR TOTAL DOS PROD.",
+     "VL. TOTAL DOS PRODUTOS" e variações truncadas/abreviadas semelhantes como EQUIVALENTES a
+     "VALOR TOTAL DOS PRODUTOS" para efeito desta regra - nunca trate um rótulo truncado como
+     "termo não claro" (regra 6) só porque a palavra "PRODUTOS" não apareceu por completo.
+     Confirme pela posição (bloco "Cálculo do Imposto"/linha de totais) e pelo valor numérico
+     (bruto, maior ou igual ao líquido) que é o mesmo campo, mesmo com o rótulo cortado.
 
 5. Ainda em NF-e (DANFE): para `valorTotalDocumento`, usar o valor total líquido (final) da nota
    fiscal, após todas as deduções e descontos (ex: "73800.01"). Ou seja, em DANFE
