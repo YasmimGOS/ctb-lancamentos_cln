@@ -1836,6 +1836,158 @@ chave.
   8826781/pedido 6613/nota 936 e 8826855/pedido 6612/nota 932) ficaram com ICMS indevidamente
   preenchido - avaliar correção manual no Mega.
 
+### 3.36 IA alucina cidade do prestador e classifica NFS-e como NFS-EG (Goiânia) para fornecedor de outra UF - CORRIGIDO (07/10/2026)
+
+- **Gatilho:** pedido 326084 (filial 3, fornecedor POWERFLEET BRASIL LTDA, CNPJ
+  `10.426.974/0001-95`), nota 1141. A 1ª chamada da IA retornou `tipoDocFiscal: "NFS-EG"`
+  diretamente (não via reclassificação de `corrigir_nfs_eg_por_prestador_goiania`), com
+  `municipioPrestacao` vazio no JSON extraído - ou seja, a IA não tinha evidência extraída que
+  justificasse "Goiânia". Confirmado via consulta externa (CNPJ) que a Powerfleet Brasil é sediada
+  em Barueri/SP, não em Goiânia/GO: classificação incorreta (alucinação), mesma categoria de erro
+  já registrada em `CNPJS_PRESTADOR_GOIANIA`/`TIPO_DOC_POR_EMITENTE` (seção 3.30 e caso MEI
+  320904).
+- **Impacto real nesse lançamento:** nenhum - `config/settings.py::TABELA_DEPARA_TIPODOC` mapeia
+  `NFS-EG` e `NFS-E` para o mesmo `contasPagarTipoDoc` ("NFS") e mesma `acao`
+  (vista=295/prazo=82), e todo o restante de `business_rules.py` trata os dois tipos de forma
+  idêntica (ex.: `resolver_chave_acesso`). O payload enviado ao Mega (transação 8826647) já saiu
+  correto. O problema é só o rótulo `tipoDocFiscal` ficar errado para fins de rastreabilidade/
+  auditoria e para não repetir o padrão de alucinação com este fornecedor.
+- **Correção:** `config/settings.py::TIPO_DOC_POR_EMITENTE` - adicionado
+  `"10426974000195": "NFS-E"`, forçando a reclassificação para NFS-E genérico sempre que a IA
+  marcar esse CNPJ emitente como NFS-EG (mesmo padrão já usado para o caso MEI 320904). Teste:
+  `tests/test_business_rules.py::test_override_emitente_powerfleet_nao_e_goiania`.
+- **Pendência:** nenhuma correção manual necessária no Mega (ver "Impacto real" acima).
+
+### 3.37 PIS/COFINS/CSLL retidos em valor único combinado (sem abertura individual) jogados inteiros em CSLL - CORRIGIDO (07/10/2026)
+
+> Variante nova do layout DANFSe v2.0 já tratado na seção 3.25: lá, o documento trazia PIS e COFINS
+> com valores próprios, separados da "Contribuições Sociais – Retidas" (só CSLL). Aqui, o tomador
+> reteve os 3 tributos em bloco único, sem abrir PIS e COFINS individualmente - a regra da seção
+> 3.25, aplicada ao pé da letra, joga o valor inteiro em CSLL e deixa PIS/COFINS zerados.
+
+- **Gatilho:** usuária notificada pelo log de disparo (pedido 1828/nota 239, Kings Cross Capital
+  Ltda → Cerrado Empreendimentos Imobiliários, filial 198838) que PIS/COFINS/CSLL estavam retidos
+  no documento mas só CSLL saiu correto no lançamento ("só o CSLL que deu certo"). Transação Mega
+  **8837055** já lançada com `totalISS=105.34`, `totalIRRF=31.60`, `totalCSLL=97.97`,
+  `valorPIS=0.00`, `valorCOFINS=0.00`.
+- **Causa raiz confirmada** (PDF conferido, pedido 1828/nota 239): bloco "TRIBUTAÇÃO FEDERAL
+  (EXCETO CBS)" do documento mostra `IRRF: R$31,60`, `Contribuição Previdenciária – Retida: -`,
+  `Contribuições Sociais – Retidas: R$97,97`, `PIS – Débito Apuração Própria: -`, `COFINS – Débito
+  Apuração Própria: -`, `Descrição Contrib. Sociais – Retidas: PIS/COFINS/CSLL Retidos`. Ou seja: o
+  tomador não é "errado" ao agrupar os 3 tributos num único campo - mas a extração atual (regra da
+  seção 3.25) mapeia esse campo único sempre para CSLL, sem checar se a descrição cita os 3
+  tributos juntos. `R$2.106,80 (base) × 4,65% = R$97,97` confirma que o valor é a soma combinada
+  de PIS (0,65%) + COFINS (3,00%) + CSLL (1,00%), a alíquota padrão de retenção combinada da IN
+  1234/2012 - não CSLL sozinha.
+- **Regra correta (confirmada pela usuária):** gatilho estrito, as DUAS condições precisam valer
+  ao mesmo tempo - "PIS – Débito Apuração Própria" E "COFINS – Débito Apuração Própria" vêm ambos
+  vazios ("-") E a descrição de "Contribuições Sociais – Retidas" é EXATAMENTE o texto "PIS/COFINS/
+  CSLL Retidos" (não qualquer texto citando os 3 tributos - só esse exato; "PIS/COFINS Retido" sem
+  o CSLL, como na seção 3.25, NÃO ativa esta variante). Com as duas condições confirmadas, ratear
+  o valor único pela base bruta (mesma base do IRRF/ISSQN):
+  PIS = base × 0,65%, COFINS = base × 3,00%, CSLL = base × 1,00%. Para este caso: base = 2106,80 →
+  PIS = 13,69 / COFINS = 63,20 / CSLL = 21,07 (soma 97,96, 1 centavo abaixo do valor combinado
+  97,97 por arredondamento de cada parcela - aceitável, não forçar fechamento exato).
+- **1ª correção aplicada (INSUFICIENTE - pedia pra IA fazer o rateio):** `prompts/prompt_1a_ia.txt`
+  ganhou uma "VARIANTE - retenção combinada" pedindo pra IA ratear 0,65%/3%/1% sozinha.
+- **ARMADILHA OPERACIONAL #1 (07/10/2026): correção de prompt não entra em vigor sem reiniciar o
+  processo do disparo.** O 1º reprocessamento do pedido 1828 depois dessa correção (transação
+  8838887, 14:32) saiu **igualmente errado** (`valorPIS`/`valorCOFINS` continuaram "0.00").
+  Investigação confirmou que NÃO era falha da regra nova: o processo que executa o disparo agendado
+  é um serviço de longa duração que roda nesta mesma pasta mas não recarrega
+  `prompts/prompt_1a_ia.txt` do disco a cada disparo - continuava servindo a versão do prompt
+  carregada em memória antes da edição. Confirmado comparando o tamanho do corpo da requisição
+  logado (`"total: X caracteres"` em `services/http_client.py::_format_json` via `json.dumps`)
+  entre a 1ª tentativa (10:56, antes da correção) e o reprocessamento (14:32, depois da correção):
+  os dois bateram exatamente no mesmo número (50258), enquanto carregar o prompt atual do disco e
+  simular o mesmo `json.dumps` dá 52577+. **Toda vez que `prompts/prompt_1a_ia.txt` ou
+  `prompt_2a_ia.txt` for editado, o processo/serviço do disparo precisa ser reiniciado antes do
+  próximo lançamento para a mudança valer** - salvar o arquivo não basta.
+- **ARMADILHA #2 (07/10/2026): mesmo COM o serviço reiniciado, a IA não sabe fazer o rateio
+  percentual sozinha.** Depois do reinício confirmado (prompt novo de fato enviado, corpo da
+  requisição com 52665 caracteres), o pedido 1828 foi reprocessado de novo (transação **8839089**,
+  14:55) - a IA reconheceu corretamente que PIS/COFINS não deviam ficar zerados, mas **copiou o
+  valor combinado inteiro (97,97) para os 3 campos** (`valorPIS=97.97`, `valorCOFINS=97.97`,
+  `totalCSLL=97.97`, somando 293,91 em vez de 97,97) em vez de aplicar as alíquotas 0,65%/3%/1%.
+  Conclusão: pedir pra um modelo de linguagem fazer aritmética de rateio percentual dentro do
+  prompt de extração não é confiável o suficiente para uso financeiro - mesmo seguindo a instrução
+  textual corretamente até certo ponto (reconheceu que não devia zerar), errou a conta.
+- **Correção final aplicada (determinística, sem depender de aritmética da IA):**
+  1. `prompts/prompt_1a_ia.txt` - a IA agora só faz EXTRAÇÃO DE TEXTO: um novo campo
+     `descricaoRetencaoSocial` captura o texto verbatim de "Descrição Contrib. Sociais – Retidas"
+     (ex.: "PIS/COFINS/CSLL Retidos"), sem calcular nada. `valorPIS`/`valorCOFINS`/`totalCSLL`
+     continuam seguindo a regra padrão da seção 3.25 (tipicamente PIS/COFINS saem "0.00" e o valor
+     combinado vai inteiro pra `totalCSLL`/`valorCSLL` nesse cenário).
+  2. `services/business_rules.py::ratear_retencao_combinada_pis_cofins_csll` (nova função pura) -
+     faz o rateio em Python, com `round()`, sem depender da IA.
+  3. `services/etl_service.py::consolidar_resposta_ia` - chama a nova função logo depois de
+     `aplicar_iss_do_valor_retido`.
+  4. Testado isoladamente com os dados reais do pedido 1828 (base 2106,80, descrição "PIS/COFINS/
+     CSLL Retidos", PIS/COFINS "0.00", CSLL "97.97"): resultado `valorPIS=13.69`/
+     `valorCOFINS=63.20`/`totalCSLL=21.07` - bate exato com o esperado.
+- **ARMADILHA #3 (07/10/2026): o gatilho original (só ativar quando `valorPIS`/`valorCOFINS`
+  vinham "0.00") ainda deixou passar um caso.** Pedido 894/nota 227 (mesmo emitente Kings Cross
+  Capital, tomador diferente - MOTO FOR COM DISTR AUTOM LTDA), reprocessado às 15:20 já com a
+  correção determinística ativa, saiu de novo errado (transação **8839368**): a IA extraiu
+  `descricaoRetencaoSocial="PIS/COFINS/CSLL Retidos"` corretamente, mas desta vez colocou o valor
+  combinado (base 526,70 × 4,65% = 24,49) em `valorCOFINS`/`valorCofins` E `totalCSLL`/`valorCSLL`
+  simultaneamente (deixando só `valorPIS="0.00"`) - um padrão de preenchimento diferente dos casos
+  anteriores (que iam só pra CSLL, ou pros 3 campos igual). Como o guard antigo exigia
+  `valorPIS`/`valorCOFINS` ambos "0.00" pra disparar, e `valorCOFINS` veio preenchido (24.49), a
+  função não ativou e o payload foi lançado sem ratear. **Correção:** removido o guard sobre
+  `valorPIS`/`valorCOFINS`/`totalCSLL` - a função agora dispara SEMPRE que
+  `descricaoRetencaoSocial` bate exato (+ `valorMercadoria` > 0), e sobrescreve os 5 campos
+  incondicionalmente. Justificativa: a descrição exata só aparece, por construção do layout, em
+  documentos sem abertura individual de PIS/COFINS - então qualquer valor que a IA tenha colocado
+  nesses campos antes é, por definição, ruído/erro de preenchimento, não dado real a preservar.
+  Reverificado com os dois casos reais (pedido 1828 e pedido 894) + caso negativo (descrição
+  diferente) - os 3 resultados batem.
+- **Pendência URGENTE (correção manual no Mega):** QUATRO transações com PIS/COFINS/CSLL errados
+  (mesmo documento do pedido 1828 lançado 3 vezes durante os testes - ver
+  `IGNORAR_JA_PROCESSADO_TESTE` na seção 3.21/3.24):
+  - **8837055** (pedido 1828/nota 239, 10:56) - `valorPIS=0.00`/`valorCOFINS=0.00`/`totalCSLL=97.97`
+    → corrigir para `valorPIS=13.69`/`valorCOFINS=63.20`/`totalCSLL=21.07`.
+  - **8838887** (pedido 1828/nota 239, 14:32) - mesmos valores errados → mesma correção acima.
+  - **8839089** (pedido 1828/nota 239, 14:55) - `valorPIS=97.97`/`valorCOFINS=97.97`/
+    `totalCSLL=97.97` → mesma correção acima (13.69/63.20/21.07).
+  - **8839368** (pedido 894/nota 227, 15:20) - `valorPIS=0.00`/`valorCOFINS=24.49`/`totalCSLL=24.49`
+    → corrigir para `valorPIS=3.42`/`valorCOFINS=15.80`/`totalCSLL=5.27` (base 526,70).
+  Avaliar também se as 3 transações do pedido 1828 devem permanecer no Mega ou se só uma é a
+  definitiva (mesmo padrão da seção 3.25). Somar à lista de pendências de correção manual já
+  existente (seções 3.10, 3.12, 3.15, 3.17, 3.18, 3.23, 3.25, 3.35).
+- **Pendência de confirmação:** aguardando reprocessamento (DEPOIS do reinício do serviço com esta
+  correção determinística) de outra nota com retenção combinada para confirmar que o rateio
+  0,65%/3%/1% sai correto na prática em produção.
+
+### 3.38 ICMS não deve ser lançado para Pontal Administração - 2º CNPJ sem Inscrição Estadual (generaliza a seção 3.35) - CORRIGIDO (07/10/2026)
+
+- **Gatilho:** pedido 8428 (filial 15537, fornecedor Ferramaq Comércio de Ferramentas Máquinas e
+  EPI, tomador PONTAL ADMINISTRAÇÃO R PARTICIPAÇÕES LTDA CNPJ `07.258.201/0001-32`). Lançado
+  (transação Mega **8837122**) com `baseICMS=862.50`/`valorICMS=163.89` preenchidos. A usuária
+  confirmou: "a Pontal também não é contribuinte de ICMS, não aproveita e não tem Inscrição
+  Estadual, mesmo tendo na nota não puxa - igual o caso do Condomínio Shopping Center Cerrado"
+  (seção 3.35).
+- **Mesma causa raiz/mesmo tratamento da seção 3.35** (não repetir a explicação aqui): o
+  fornecedor é contribuinte normal e destaca ICMS na NF por obrigação própria; o tomador, sem
+  Inscrição Estadual, não tem débito de ICMS para compensar e não pode escriturar esse crédito -
+  o valor entra como custo, não como imposto recuperável.
+- **Correção (generaliza o mecanismo em vez de duplicar):** a lista de CNPJs sem IE passou a
+  suportar múltiplos CNPJs, já prevendo que mais casos iguais apareçam:
+  1. `config/settings.py` - `CNPJ_CONDOMINIO_SEM_IE` (string única) virou `CNPJS_SEM_IE` (set),
+     com `"24357174000174"` (Condomínio, seção 3.35) e `"07258201000132"` (Pontal
+     Administração) cadastrados.
+  2. `services/etl_service.py::montar_payload` - `zera_icms` agora testa
+     `cnpj_filial_pedido in CNPJS_SEM_IE` em vez de comparar igualdade com uma única constante;
+     `montar_item`/raiz do payload não mudaram (já recebiam `zera_icms` como booleano).
+  3. `config/__init__.py` - export atualizado de `CNPJ_CONDOMINIO_SEM_IE` para `CNPJS_SEM_IE`.
+  Continua sendo uma lista cadastrada manualmente (mesma decisão da seção 3.35: não dá para
+  identificar "sem Inscrição Estadual" automaticamente a partir dos dados do pedido hoje) - só
+  que agora comporta N CNPJs sem precisar de código novo a cada caso.
+- **Pendência URGENTE (correção manual no Mega):** transação **8837122** (pedido 8428/nota 6376)
+  ficou com `baseICMS=862.50`/`valorICMS=163.89` indevidamente preenchidos - zerar manualmente.
+  Somar à lista de pendências de correção manual (seções 3.10, 3.12, 3.15, 3.17, 3.18, 3.23, 3.25,
+  3.35, 3.37).
+
 ---
 
 ## 4. Integracao IA (Claude)
@@ -1931,6 +2083,43 @@ chave.
 ---
 
 ## 9. Changelog
+
+### v1.13 (07/10/2026) - Rateio PIS/COFINS/CSLL: gatilho endurecido pra ignorar o que a IA preencheu (ver 3.37)
+- `services/business_rules.py::ratear_retencao_combinada_pis_cofins_csll` - removido o guard que
+  exigia `valorPIS`/`valorCOFINS` virem "0.00" antes de ratear. A IA se mostrou inconsistente em
+  como preenche esses campos quando há retenção combinada (ora só CSLL, ora CSLL+COFINS, ora os 3
+  campos com o total) - a função agora dispara sempre que `descricaoRetencaoSocial` bate
+  EXATAMENTE "PIS/COFINS/CSLL Retidos" (+ `valorMercadoria` > 0), sobrescrevendo os 5 campos
+  incondicionalmente.
+- Pendente: correção manual da transação 8839368 (pedido 894/nota 227) também, além das 3 do
+  pedido 1828 já pendentes (ver v1.12 abaixo).
+
+### v1.12 (07/10/2026) - Rateio de PIS/COFINS/CSLL combinado movido pra código determinístico (ver 3.37)
+- A versão anterior (v1.10) pedia pra IA ratear 0,65%/3%/1% sozinha no prompt - testado em produção
+  e a IA errou (copiou o valor combinado inteiro nos 3 campos em vez de ratear). Rateio por
+  percentual não é confiável via prompt de LLM para uso financeiro.
+- `prompts/prompt_1a_ia.txt` - novo campo `descricaoRetencaoSocial` (extração de texto verbatim,
+  sem cálculo); IA volta a só seguir a regra padrão da seção 3.25 para PIS/COFINS/CSLL.
+- `services/business_rules.py::ratear_retencao_combinada_pis_cofins_csll` (nova função pura) - faz
+  o rateio em Python/`round()`, chamada em `etl_service.py::consolidar_resposta_ia`.
+- Pendente: correção manual de 3 transações do pedido 1828/nota 239 no Mega (8837055, 8838887,
+  8839089) - todas com PIS/COFINS/CSLL errados durante os testes desta correção.
+- Também confirmado nesta sessão: editar `prompts/*.txt` exige reiniciar o processo/serviço do
+  disparo antes do próximo lançamento valer a mudança (ver seção 3.37).
+
+### v1.11 (07/10/2026) - ICMS zerado para tomador sem IE agora suporta lista de CNPJs (ver 3.38)
+- `config/settings.py` - `CNPJ_CONDOMINIO_SEM_IE` (string) virou `CNPJS_SEM_IE` (set); adicionado
+  CNPJ da Pontal Administração R Participações Ltda (`07258201000132`), 2º caso confirmado sem
+  Inscrição Estadual.
+- `services/etl_service.py::montar_payload` - `zera_icms` passa a testar `in CNPJS_SEM_IE`.
+- Pendente: correção manual da transação 8837122 (pedido 8428/nota 6376) no Mega.
+
+### v1.10 (07/10/2026) - Retenção combinada PIS/COFINS/CSLL sem abertura individual (ver 3.37)
+- `prompts/prompt_1a_ia.txt` (seção "Outros tributos retidos", item 5) - nova variante do layout
+  DANFSe v2.0: quando PIS e COFINS individuais vêm vazios e a descrição de "Contribuições Sociais
+  – Retidas" cita os 3 tributos juntos, ratear o valor único pela base bruta (PIS 0,65% / COFINS
+  3,00% / CSLL 1,00%) em vez de jogar tudo em CSLL.
+- Pendente: correção manual da transação 8837055 (pedido 1828/nota 239) no Mega.
 
 ### v1.9 (05/10/2026) - Remove fallback de CNPJ emitente que deixava passar compras via marketplace (ver 3.32)
 - `controllers/lancamento_controller.py` (Validação 3) - removida a "última medida" que confiava

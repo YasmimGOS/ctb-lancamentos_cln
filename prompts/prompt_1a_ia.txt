@@ -77,7 +77,8 @@ Template obrigatório:
   "valorCofins": "string",
   "baseCSLL": "string",
   "percentualCSLL": "string",
-  "valorCSLL": "string"
+  "valorCSLL": "string",
+  "descricaoRetencaoSocial": "string"
 }
 
 Regras obrigatórias de saída:
@@ -674,6 +675,24 @@ Outros tributos retidos:
      Retidas: PIS/COFINS Retido" (linha 2). JSON obrigatório para PIS/COFINS/CSLL neste caso:
      `"valorPIS": "3.42", "valorCOFINS": "15.80", "valorCofins": "15.80", "totalCSLL": "5.27",
      "valorCSLL": "5.27"` - os 3 valores são preenchidos, nenhum fica zerado.
+   - CAMPO `descricaoRetencaoSocial`: sempre que a seção "TRIBUTAÇÃO FEDERAL (EXCETO CBS)" (ou
+     equivalente) trouxer uma "Descrição Contrib. Sociais – Retidas" (ou rótulo equivalente),
+     transcrever esse texto VERBATIM (exatamente como aparece no documento, sem resumir, traduzir
+     ou reformatar) para o campo `descricaoRetencaoSocial`. Não calcular nada a partir desse texto
+     aqui - é só transcrição, igual a qualquer outro campo textual. Se não houver esse rótulo no
+     documento, usar "" (regra 8). NÃO alterar `valorPIS`/`valorCOFINS`/`valorCofins`/`totalCSLL`/
+     `valorCSLL` com base nesse texto - continuar seguindo a regra padrão acima (mapear
+     "Contribuições Sociais – Retidas" para `totalCSLL`/`valorCSLL`, e os campos "PIS/COFINS –
+     Débito Apuração Própria" para `valorPIS`/`valorCOFINS` quando tiverem valor próprio, "0.00"
+     quando vierem como "-"). O rateio de retenções combinadas (quando PIS/COFINS individuais vêm
+     vazios e a descrição cita os 3 tributos juntos) é feito depois, em código determinístico fora
+     desta extração - NÃO tentar fazer essa divisão percentual aqui, só transcrever o texto da
+     descrição e deixar os valores de PIS/COFINS conforme a regra padrão (tipicamente "0.00" nesse
+     cenário). Exemplo real (pedido 1828/nota 239, 07/10/2026): "PIS – Débito Apuração Própria: -",
+     "COFINS – Débito Apuração Própria: -", "Descrição Contrib. Sociais – Retidas: PIS/COFINS/CSLL
+     Retidos", "Contribuições Sociais – Retidas: R$97,97" → `"valorPIS": "0.00", "valorCOFINS":
+     "0.00", "valorCofins": "0.00", "totalCSLL": "97.97", "valorCSLL": "97.97",
+     "descricaoRetencaoSocial": "PIS/COFINS/CSLL Retidos"`.
 
 Valor total do documento e Valores de Mercadoria/Bases:
 1. Para `valorTotalDocumento`, usar o valor total bruto do documento fiscal principal, EXCETO nos

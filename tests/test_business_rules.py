@@ -17,6 +17,10 @@ def test_override_emitente_mei_goiania_forca_nfs_e():
     assert br.resolver_tipo_doc_por_emitente("NFS-EG", "19164502000186") == "NFS-E"
 
 
+def test_override_emitente_powerfleet_nao_e_goiania():
+    assert br.resolver_tipo_doc_por_emitente("NFS-EG", "10426974000195") == "NFS-E"
+
+
 def test_corrige_emitente_tomador_invertidos():
     ia = {
         "nomeEmitente": "RAPIDO ARAGUAIA LTDA",

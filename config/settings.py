@@ -203,15 +203,21 @@ TIPO_DOC_POR_EMITENTE: dict[str, str] = {
     # de MEI (prompts/prompt_1a_ia.txt, regra 15). Para MEI a nota deve ser NFS-E. Corrige caso
     # real: pedido 320904, RONILSON COSTA DE MOURA lancado como NFS-EG.
     "19164502000186": "NFS-E",
+    # Powerfleet Brasil Ltda e sediada em Barueri/SP, nao em Goiania, mas a IA alucinou a cidade
+    # do prestador e classificou como NFS-EG. Caso real: pedido 326084, nota 1141, 06/10/2026.
+    "10426974000195": "NFS-E",
 }
 CNPJ_ALUGUEL_IR = "03397056000110"
 CNPJ_VIBRA_ENERGIA = "34274233030605"
 CNPJ_APLICACAO_281 = "04554425000120"
 CNPJ_EQUATORIAL = "00316622501205"
-# Condominio Shopping Center Cerrado - sem Inscricao Estadual, nao se credita de ICMS mesmo quando
-# o fornecedor destaca o imposto na NF (decisao explicita do analista financeiro, 06/10/2026 -
-# ver docs/REGRAS_PROJETO.md secao 3.35). CNPJ da FILIAL/tomador, nao do emitente.
-CNPJ_CONDOMINIO_SEM_IE = "24357174000174"
+# Tomadores/filiais sem Inscricao Estadual - nao sao contribuintes de ICMS, entao nao se creditam
+# do imposto mesmo quando o fornecedor destaca o valor na NF (decisao explicita do analista
+# financeiro). CNPJ da FILIAL/tomador, nao do emitente.
+CNPJS_SEM_IE = {
+    "24357174000174",  # Condominio Shopping Center Cerrado (06/10/2026, REGRAS_PROJETO.md 3.35)
+    "07258201000132",  # Pontal Administracao R Participacoes Ltda (07/10/2026, REGRAS_PROJETO.md 3.38)
+}
 
 # Prestadores de servico confirmados como sediados em Goiania (empresa, nao o local do servico -
 # ver prompts/prompt_1a_ia.txt regra 5), usados para corrigir tipoDocFiscal de "NFS-E" para

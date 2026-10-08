@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from config import (
-    CNPJ_ALUGUEL_IR, CNPJ_APLICACAO_281, CNPJ_CONDOMINIO_SEM_IE, CNPJ_VIBRA_ENERGIA,
+    CNPJ_ALUGUEL_IR, CNPJ_APLICACAO_281, CNPJS_SEM_IE, CNPJ_VIBRA_ENERGIA,
     TIPOS_DOC_SERVICO,
 )
 from utils import formatter as fmt
@@ -77,6 +77,7 @@ def consolidar_resposta_ia(ia: dict, extra: dict, pdc_codigo: Any) -> tuple[dict
     ia = br.aplicar_iss_do_valor_retido(ia, extra)
     if br.precisa_retificar_iss_nao_retido(ia, extra):
         ia = br.retificar_iss_nao_retido(ia)
+    ia = br.ratear_retencao_combinada_pis_cofins_csll(ia)
 
     # Consolidar CNPJ tomador: priorizar extra, mas validar tamanho (14 dígitos CNPJ ou 11 CPF)
     cnpj_tom_extra = val.normaliza_cnpj(_g(extra, "cnpjCpfTomador"))
@@ -129,10 +130,10 @@ def montar_item(grupo: list[dict], ia: dict, num_nota: str, cnpj_emitente: str,
     comportamento de nenhum outro fornecedor/documento (default False preserva 100% da lógica
     anterior). Ver docs/REGRAS_PROJETO.md secao 3.13.
 
-    zera_icms: True quando o tomador/filial é o Condomínio Shopping Center Cerrado (CNPJ
-    24357174000174) - sem Inscrição Estadual, não se credita de ICMS mesmo quando o fornecedor
-    destaca o imposto na NF. Zera baseIcms/percentualIcms/valorIcms do item (decisão explícita
-    do analista financeiro, 06/10/2026). Ver docs/REGRAS_PROJETO.md secao 3.35."""
+    zera_icms: True quando o CNPJ da filial/tomador está em CNPJS_SEM_IE (sem Inscrição Estadual,
+    não se credita de ICMS mesmo quando o fornecedor destaca o imposto na NF). Zera
+    baseIcms/percentualIcms/valorIcms do item (decisão explícita do analista financeiro). Ver
+    docs/REGRAS_PROJETO.md secoes 3.35 e 3.38."""
     dado_pedido = grupo[0]
     is_aluguel = cnpj_emitente == CNPJ_ALUGUEL_IR
     is_vibra = cnpj_emitente == CNPJ_VIBRA_ENERGIA
@@ -343,7 +344,7 @@ def montar_payload(pedido_lista: dict, dados_pedido: list[dict], ia: dict, cnpj_
     is_aluguel = cnpj_emitente == CNPJ_ALUGUEL_IR
     is_servico = br.eh_documento_servico(tipo_doc, TIPOS_DOC_SERVICO)
     cnpj_filial_pedido = val.normaliza_cnpj(str(_g(dados_pedido[0] if dados_pedido else {}, "CNPJ_CPF_FILIAL", default="")))
-    zera_icms = cnpj_filial_pedido == CNPJ_CONDOMINIO_SEM_IE
+    zera_icms = cnpj_filial_pedido in CNPJS_SEM_IE
     # Agrupa linhas de rateio (mesmo ITEM_SEQUENCIA) num único item - qualquer pedido rateado entre
     # vários centros de custo/projetos vem com uma linha de dados_pedido por rateio, e virar um
     # itensReceb por linha gera chave duplicada no Mega (Constraint PK_EST_ITENSRECEB). Não é

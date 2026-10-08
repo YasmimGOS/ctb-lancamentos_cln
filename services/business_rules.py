@@ -114,6 +114,52 @@ def aplicar_iss_do_valor_retido(ia: dict, extra: dict) -> dict:
     return ia
 
 
+_DESCRICAO_RETENCAO_COMBINADA = "PIS/COFINS/CSLL Retidos"
+_ALIQUOTA_PIS_COMBINADA = 0.0065
+_ALIQUOTA_COFINS_COMBINADA = 0.03
+_ALIQUOTA_CSLL_COMBINADA = 0.01
+
+
+def ratear_retencao_combinada_pis_cofins_csll(ia: dict) -> dict:
+    """Quando o documento retém PIS+COFINS+CSLL num único valor combinado (sem abrir cada um
+    individualmente), a IA não deve fazer a divisão por alíquota sozinha - testes reais mostraram
+    que ela erra (ex.: copia o valor combinado inteiro para os 3 campos em vez de ratear). Esta
+    função faz o rateio determinístico em Python: PIS 0,65% / COFINS 3,00% / CSLL 1,00% sobre a
+    base bruta (`valorMercadoria`) - a soma dá a alíquota combinada padrão de 4,65% (IN 1234/2012).
+
+    Gatilho (replica o critério do prompt - ver docs/REGRAS_PROJETO.md secao 3.37): SÓ depende de
+    `descricaoRetencaoSocial` ser EXATAMENTE "PIS/COFINS/CSLL Retidos" (não generalizar para outras
+    descrições) + ter `valorMercadoria` (base) extraído. NÃO depende de como a IA preencheu
+    `valorPIS`/`valorCOFINS`/`totalCSLL`/`valorCSLL` - testes reais mostraram a IA inconsistente
+    nesse ponto (ora joga tudo em CSLL, ora em CSLL+COFINS, ora copia o total nos 3 campos), mas a
+    presença dessa descrição exata já é, por construção do layout, garantia de que o documento não
+    tem abertura individual de PIS/COFINS - então SEMPRE sobrescreve os 5 campos com o rateio
+    correto quando a descrição bate, independente do que a IA tiver preenchido neles antes."""
+    descricao = str(ia.get("descricaoRetencaoSocial", "")).strip()
+    if descricao != _DESCRICAO_RETENCAO_COMBINADA:
+        return ia
+    base = fmt.to_float(ia.get("valorMercadoria", "0"))
+    if base <= 0:
+        return ia
+    pis = round(base * _ALIQUOTA_PIS_COMBINADA, 2)
+    cofins = round(base * _ALIQUOTA_COFINS_COMBINADA, 2)
+    csll = round(base * _ALIQUOTA_CSLL_COMBINADA, 2)
+    base_fmt = fmt.format_number(base)
+    ia = dict(ia)
+    ia["valorPIS"] = fmt.format_number(pis)
+    ia["basePIS"] = base_fmt
+    ia["percentualPIS"] = "0.65"
+    ia["valorCOFINS"] = fmt.format_number(cofins)
+    ia["valorCofins"] = fmt.format_number(cofins)
+    ia["baseCofins"] = base_fmt
+    ia["percentualCofins"] = "3.00"
+    ia["totalCSLL"] = fmt.format_number(csll)
+    ia["valorCSLL"] = fmt.format_number(csll)
+    ia["baseCSLL"] = base_fmt
+    ia["percentualCSLL"] = "1.00"
+    return ia
+
+
 def corrigir_valor_mercadoria_bruto_nf(valor_mercadoria_ia: float, valor_total_documento: float,
                                         valor_desconto_geral: float) -> float:
     """Reconstroi o valor bruto ("VALOR TOTAL DOS PRODUTOS") de NF-e/DANFE quando a IA devolveu o
